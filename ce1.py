@@ -9,9 +9,11 @@ import re
 import importlib.util
 import inspect
 from bitstring import ConstBitStream
+import msgpack
 
 from genome import Genome, EngineConfig, Grammar
-from deflate import parse_dynamic_huffman_block
+from deflate import parse_dynamic_huffman_block, parse_static_huffman_block, parse_stored_block, create_deflate_stream, validate_deflate_stream, BlockProcessor
+from aspire import counts_render, sort_by_count, counts_to_color, Aspirate, mix64, stable_str_hash
 
 # --- Function-table bitmask (inputs) ---
 IN_NAME  = 1 << 0
@@ -24,7 +26,7 @@ logger.setLevel(logging.INFO)
 
 # Simple console handler
 handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
@@ -45,97 +47,10 @@ class BlockResult:
     mean_surprise: float = 0.0
     std_surprise: float = 0.0
 
-# --- Block Processor (Handles individual DEFLATE blocks) ---
-class BlockProcessor:
-    """Processes individual DEFLATE blocks, driving quaternion physics and fusion events."""
-    
-    def __init__(self, asset_name: str, genome, ingest_text_func):
-        """
-        Initialize the block processor for a specific asset.
-        Sets up the stream and ingests text for grammar building.
-        """
-        self.asset_name = asset_name
-        self.genome = genome
-        self.current_block_type = None
-        self.current_trees = None
-        self.block_count = 0
-        self.total_blocks_processed = 0
-        
-        # Validate asset exists
-        if asset_name not in genome.extra_assets:
-            raise ValueError(f"Asset '{asset_name}' not found in genome")
-
-        # Get compressed/decompressed bytes
-        self.compressed_bytes = genome.compressed_assets.get(asset_name, None)
-        self.decompressed_bytes = genome.extra_assets.get(asset_name, b"")
-        
-        # Ingest text to build grammar
-        ingest_text_func(asset_name, self.decompressed_bytes)
-        
-        # Create stream for processing
-        stream_bytes = self.compressed_bytes if self.compressed_bytes is not None else self.decompressed_bytes
-        self.stream = ConstBitStream(bytes=stream_bytes)
-
-    def process_block(self) -> Dict:
-        """Processes a single DEFLATE block and returns block information."""
-        last_block = self.stream.read('bool')
-        block_type = self.stream.read('uint:2')
-
-        # Parse the block based on type
-        if block_type == 2:  # Dynamic Huffman
-            lit_len_tree, dist_tree, meta = parse_dynamic_huffman_block(self.stream)
-        else:
-            # Handle other block types (placeholder)
-            lit_len_tree, dist_tree, meta = {}, {}, {}
-
-        self.block_count += 1
-        self.total_blocks_processed += 1
-        
-        return {
-            'block_type': block_type,
-            'last_block': last_block,
-            'lit_len_tree': lit_len_tree,
-            'dist_tree': dist_tree,
-            'meta': meta
-        }
-    
-    def decode_payload(self, lit_len_tree: Dict, dist_tree: Dict) -> List[str]:
-        """
-        Decodes an incoming stream of variable-length code bits (L+D) and back-
-        references (the arguments to the stored copy literals) from the Huffman trees.
-        Returns a list of decoded path elements: (name, length, distance)
-        """
-        decoded = []
-        try:
-            while self.stream.pos < len(self.stream):
-                # Decode literal/length
-                lit_len = self._decode_symbol(lit_len_tree)
-                if lit_len < 256:  # Literal
-                    decoded.append(chr(lit_len))
-                elif lit_len == 256:  # End of block
-                    break
-                else:  # Length/distance pair
-                    length = lit_len - 257
-                    distance = self._decode_symbol(dist_tree)
-                    # For now, just add as a reference marker
-                    decoded.append(f"<{length},{distance}>")
-        except Exception as e:
-            # Note: we don't have logger here, so we'll just continue
-            pass
-        return decoded
-
-    def _decode_symbol(self, tree: Dict) -> int:
-        """Decodes a single symbol from the Huffman tree."""
-        # This is a simplified decoder - in practice you'd use the actual tree structure
-        # For now, just read a byte as a placeholder
-        return self.stream.read('uint:8')
-
-
-# Helper functions moved to ce1_deflate.py
-
-
 # --- Core Engine ---
-class CE1_Core:
+
+
+class CE1Core:
     """
     A strange recombinator that traverses the fractal environment of a zip file,
     constantly reconfiguring itself to parse the DEFLATE stream of its own source code.
@@ -144,6 +59,9 @@ class CE1_Core:
         self.genome = genome
         self.cfg = genome.config
         self.grammar = genome.grammar
+        # Minted symbols tracking
+        self.minted_symbols: List[str] = []
+        self.last_minted_symbol: Optional[str] = None
 
         # --- Opcode Sourcing ---
         # Look for custom operators in the genome and patch the core methods.
@@ -203,6 +121,28 @@ class CE1_Core:
         self.op_param_counts: Dict[str, int] = {}
         
         # Block processor is stateless, no need to instantiate
+
+        # --- Worlds registry (typemasks, completeness) ---
+        # Define minimal bit taxonomy for typemask coverage
+        self.WORLD_BITS: Dict[str, int] = {
+            'block:stored': 1 << 0,
+            'block:static': 1 << 1,
+            'block:dynamic': 1 << 2,
+            'ev:literal': 1 << 3,
+            'ev:match': 1 << 4,
+            'ev:phase': 1 << 5,
+            'ev:atom': 1 << 6,
+            'ev:summary': 1 << 7,
+        }
+        self.worlds: Dict = self._load_worlds()
+        # Module-owned carry for CE1: minted symbols (∑), cycles (∞)
+        self.carry_ce1 = Aspirate()
+        # Select an active world based on policy at startup
+        try:
+            self._select_active_world()
+            self._save_worlds()
+        except Exception:
+            pass
 
     def _load_opcodes(self):
         """Checks the genome for bytecode opcodes and patches core methods."""
@@ -458,8 +398,8 @@ class CE1_Core:
         logger.warning(f"Branch cut: {reason}.")
         return q
 
-    def excite_by_length_hist(self, q: np.ndarray, lit_len_tree: Dict, angle: float) -> np.ndarray:
-        lengths = np.array([L for (_, L) in lit_len_tree.values()], dtype=int)
+    def excite_by_length_hist(self, q: np.ndarray, lit_len_code_lengths: Dict, angle: float) -> np.ndarray:
+        lengths = np.array(list(lit_len_code_lengths.values()), dtype=int)
         if lengths.size == 0:
             return q
         bins = np.bincount(np.clip(lengths, 0, 15), minlength=16)
@@ -475,14 +415,15 @@ class CE1_Core:
             q_blend = self._bead_conjugate(q_blend, bead, lam)
         return self._quat_norm(q_blend)
 
-    def apply_dynamic_tree(self, q: np.ndarray, lit_len_tree: Dict, internal_counts: Dict) -> Tuple[np.ndarray, float, Optional[int]]:
-        external_counts = {sym: L for sym, (_, L) in lit_len_tree.items()} if lit_len_tree else {}
+    def apply_dynamic_tree(self, q: np.ndarray, lit_len_code_lengths: Dict, internal_counts: Dict) -> Tuple[np.ndarray, float, Optional[int]]:
+        external_counts = dict(
+            lit_len_code_lengths) if lit_len_code_lengths else {}
         q_rot, angle = self._rotation_from_inverted_diff(external_counts, internal_counts)
         q = self._enter_branch(level=0, q=q, angle=angle, q_rot=q_rot)
         dom_L = None
-        if lit_len_tree:
-            q = self.excite_by_length_hist(q, lit_len_tree, angle)
-            lengths = np.array([L for (_, L) in lit_len_tree.values()], dtype=int)
+        if lit_len_code_lengths:
+            q = self.excite_by_length_hist(q, lit_len_code_lengths, angle)
+            lengths = np.array(list(lit_len_code_lengths.values()), dtype=int)
             if lengths.size:
                 vals, cnts = np.unique(np.clip(lengths, 0, 15), return_counts=True)
                 dom_L = int(vals[np.argmax(cnts)])
@@ -515,17 +456,14 @@ class CE1_Core:
                 self.transitions_per_level[level] = new_matrix
             
             self.S = len(self.symbols)
-            logger.info(f"Added new symbol: '{symbol}' (total: {self.S})")
+            # logger.info(f"Added new symbol: '{symbol}' (total: {self.S})")
 
     def _emit_step(self, level: int, q: np.ndarray, state_symbol: str) -> str:
         # Ensure symbol exists before trying to use it
         self._ensure_symbol_exists(state_symbol)
-        
-        try:
-            next_symbol, _alleles, _color, _delta = self.step(level, q, state_symbol)
-            return next_symbol
-        except Exception:
-            return state_symbol
+        next_symbol, _alleles, _color, _delta = self.step(
+            level, q, state_symbol)
+        return next_symbol
 
 
     # --- Steganographic event tags in float mantissa ---
@@ -547,6 +485,203 @@ class CE1_Core:
         v = float(q[component])
         u = np.frombuffer(np.float64(v).tobytes(), dtype=np.uint64)[0]
         return int(u & np.uint64(0x0FFF))
+
+    # --- Worlds registry helpers ---
+    def _default_worlds(self) -> Dict:
+        return {
+            'version': 1,
+            'active': 'default',
+            'worlds': {
+                'default': {
+                    'name': 'default',
+                    'typemask': 0,
+                    'typemask_size': int(len(self.WORLD_BITS)),
+                    'types_seen': {},
+                    'size': 0,
+                    'color': (0.0, 0.0, 0.0),
+                    'complete': False,
+                    'last_at': 0,
+                }
+            }
+        }
+
+    def _load_worlds(self) -> Dict:
+        try:
+            blob = self.genome.registry_get(self.genome.reg_wor)
+            if isinstance(blob, (bytes, bytearray)):
+                try:
+                    obj = msgpack.unpackb(
+                        bytes(blob), raw=False, strict_map_key=False)
+                except TypeError:
+                    obj = msgpack.unpackb(bytes(blob), raw=False)
+                if isinstance(obj, dict) and 'worlds' in obj:
+                    for w in obj.get('worlds', {}).values():
+                        if 'typemask_size' not in w:
+                            w['typemask_size'] = int(len(self.WORLD_BITS))
+                    if 'active' not in obj:
+                        obj['active'] = 'default'
+                    return obj
+        except Exception:
+            pass
+        return self._default_worlds()
+
+    def _save_worlds(self) -> None:
+        try:
+            data = msgpack.packb(self.worlds, use_bin_type=True)
+            self.genome.registry_set(self.genome.reg_wor, data)
+        except Exception:
+            pass
+
+    def _active_world(self) -> Dict:
+        name = self.worlds.get('active', 'default')
+        worlds = self.worlds.setdefault('worlds', {})
+        if name not in worlds:
+            worlds[name] = {
+                'name': name,
+                'typemask': 0,
+                'typemask_size': int(len(self.WORLD_BITS)),
+                'types_seen': {},
+                'size': 0,
+                'color': (0.0, 0.0, 0.0),
+                'complete': False,
+                'last_at': 0,
+                'glyph': '',
+            }
+        return worlds[name]
+
+    def _world_coverage(self, w: Dict) -> int:
+        mask = int((w or {}).get('typemask', 0))
+        c = 0
+        m = mask
+        while m:
+            m &= m - 1
+            c += 1
+        return c
+
+    def _select_active_world(self) -> None:
+        """Programmatically choose active world by policy.
+        Priority: complete worlds by (-size, -last_at), then incomplete by (-coverage, -size, -last_at).
+        """
+        worlds = self.worlds.setdefault('worlds', {})
+        if not worlds:
+            self.worlds['active'] = 'default'
+            self._active_world()
+            return
+        items = list(worlds.items())
+        complete = [(n, w)
+                    for n, w in items if bool((w or {}).get('complete'))]
+        if complete:
+            n, _w = sorted(complete, key=lambda it: (
+                -int((it[1] or {}).get('size', 0)), -
+                int((it[1] or {}).get('last_at', 0))
+            ))[0]
+            self.worlds['active'] = n
+            return
+        # else incomplete: use coverage then size then recency
+        n, _w = sorted(items, key=lambda it: (
+            -self._world_coverage(it[1] or {}), -int((it[1] or {}
+                                                      ).get('size', 0)), -int((it[1] or {}).get('last_at', 0))
+        ))[0]
+        self.worlds['active'] = n
+
+    def _sanitize_name(self, s: str, max_len: int = 32) -> str:
+        s2 = ''.join(ch if (ch.isalnum() or ch in ('-', '_'))
+                     else '-' for ch in s)
+        s2 = s2.strip('-_')
+        if not s2:
+            return 'world'
+        return s2[:max_len]
+
+    def _generate_world_name(self, context: str) -> str:
+        """Generate a readable world name from grammar and context (GPT-like naming by the VM)."""
+        ctx_tokens = [t.lower()
+                      for t in re.findall(r"[A-Za-z0-9_]+", context or '')]
+        ug = self.genome.grammar.unigram_counts
+        minted = self.minted_symbols if hasattr(self, 'minted_symbols') else []
+        # score: freq + context overlap + minted bonus
+
+        def score(tok: str) -> float:
+            base = float(ug.get(tok, 0))
+            overlap = 1.0 if tok.lower() in ctx_tokens else 0.0
+            minted_bonus = 2.0 if tok in minted else 0.0
+            return base + 3.0 * overlap + minted_bonus
+        candidates = sorted(
+            ug.keys(), key=lambda t: score(t), reverse=True)[:16]
+        # prefer minted or contextual tokens first
+        primaries = [t for t in minted if t in ug] + \
+            [t for t in candidates if t.lower() in ctx_tokens]
+        secondaries = [t for t in candidates if t not in primaries]
+        parts = []
+        if primaries:
+            parts.append(primaries[0])
+        if secondaries:
+            parts.append(secondaries[0])
+        if not parts:
+            parts = [context or 'world']
+        name = '-'.join(parts)
+        return self._sanitize_name(name)
+
+    def ensure_world_for_asset(self, asset_name: str) -> None:
+        """Map an asset to a program-decided world; create/switch automatically."""
+        key = (asset_name or '').split('/')[:1][0] or 'root'
+        wname = self._generate_world_name(key)
+        worlds = self.worlds.setdefault('worlds', {})
+        if wname not in worlds:
+            worlds[wname] = {
+                'name': wname,
+                'typemask': 0,
+                'typemask_size': int(len(self.WORLD_BITS)),
+                'types_seen': {},
+                'size': 0,
+                'color': (0.0, 0.0, 0.0),
+                'complete': False,
+                'last_at': 0,
+                'glyph': '',
+            }
+        self.worlds['active'] = wname
+
+    def _world_set_bit(self, bit_key: str) -> None:
+        w = self._active_world()
+        bit = int(self.WORLD_BITS.get(bit_key, 0))
+        if bit:
+            w['typemask'] = int(w.get('typemask', 0)) | bit
+            # recompute completeness via popcount vs typemask_size
+            mask = int(w['typemask'])
+            coverage = 0
+            m = mask
+            while m:
+                m &= m - 1
+                coverage += 1
+            size = int(w.get('typemask_size', len(self.WORLD_BITS)))
+            was_complete = bool(w.get('complete', False))
+            now_complete = bool(coverage >= size)
+            w['complete'] = now_complete
+            # Assign a stable glyph when world becomes complete
+            if now_complete and not was_complete:
+                if not w.get('glyph'):
+                    w['glyph'] = self._choose_world_glyph(
+                        w.get('name', 'default'))
+
+    def _world_bump_type(self, key: str, n: int = 1) -> None:
+        w = self._active_world()
+        ts = w.setdefault('types_seen', {})
+        ts[key] = int(ts.get(key, 0)) + int(n)
+
+    def save_worlds(self) -> None:
+        self._save_worlds()
+
+    def _choose_world_glyph(self, name: str) -> str:
+        """Pick a stable single-character glyph for a completed world."""
+        # Curated monochrome-friendly set: digits, uppercase, a few math letters
+        glyphs = (
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+            'αβγδεζηθλμνξπρστυφχψω'
+            '◇◆○●□■△▲▽▼◇'
+        )
+        if not name:
+            name = 'world'
+        idx = int(abs(stable_str_hash(str(name))) % len(glyphs))
+        return glyphs[idx]
 
     def reconstruct_trace(self, transformed_state: Dict, level: int = 0) -> List[Dict]:
         qs: List[np.ndarray] = transformed_state.get('final_qs', [])
@@ -623,8 +758,13 @@ class CE1_Core:
         """
         Processes a single, compressed asset from the genome, inhabiting its fractal structure.
         """
-        logger.info(f"Starting fractal run on asset: '{asset_name}'...")
         start_time = time.time()
+        # Ensure a program-decided world for this asset
+        try:
+            self.ensure_world_for_asset(asset_name)
+            self._save_worlds()
+        except Exception:
+            pass
         
         # Initialize block processor for this asset
         block_processor = BlockProcessor(asset_name, self.genome, self._ingest_text_asset)
@@ -635,33 +775,137 @@ class CE1_Core:
         final_qs: List[np.ndarray] = [q.copy()]
         symbol = 'drift' # The abstract state machine
         all_deltas = []
+        angle = 0.0
         
-        # Process blocks until end or time limit
-        while block_processor.stream.pos < len(block_processor.stream):
-            # --- Time Checks ---
+        # Consume unified event stream
+        last_glyphs: Optional[str] = None
+        last_counts = None
+        surp = Aspirate()
+        minted_in_asset = 0
+        events_in_asset = 0
+        for ev_type, payload in block_processor.events():
+            # --- Time check per event ---
             if time_budget_secs and (time.time() - start_time) > time_budget_secs:
                 logger.warning("Time budget exceeded. Halting.")
                 break
-            block_info = block_processor.process_block()
-            
-            # Here is where the VM's core logic will live.
-            # It will read the block header and reconfigure itself to become
-            # the parser for that block's specific grammar.
-            # The sequence of decoded literals and back-references will then
-            # drive the quaternion physics and fusion events.
-            
-            if block_info['block_type'] == 2:  # Dynamic Huffman
-                q, angle, dom_L = self.apply_dynamic_tree(q, block_info['lit_len_tree'], self.grammar.unigram_counts)
-                label = f"{dom_L}"
-                symbol = self._emit_step(0, q, label)
-                final_qs.append(q.copy())
-                
-                # Track surprise
+            events_in_asset += 1
+            if ev_type == 'block' and isinstance(payload, dict):
+                kind = payload.get('type')
+                # Minimal quaternion operators
+
+                def axis_from_id(x: int) -> np.ndarray:
+                    rng = (mix64(x) & 0xFFFFFFFF) / 0xFFFFFFFF
+                    theta = 2 * np.pi * rng
+                    z = 2 * ((mix64(x+1) & 0xFFFFFFFF) / 0xFFFFFFFF) - 1
+                    r = np.sqrt(max(0.0, 1 - z*z))
+                    return np.array([r*np.cos(theta), r*np.sin(theta), z])
+
+                def q_from_axis_angle(axis: np.ndarray, ang: float) -> np.ndarray:
+                    a = axis / (np.linalg.norm(axis) + 1e-9)
+                    s = np.sin(ang/2.0)
+                    return np.array([np.cos(ang/2.0), a[0]*s, a[1]*s, a[2]*s])
+
+                def qmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+                    w1, x1, y1, z1 = a
+                    w2, x2, y2, z2 = b
+                    return np.array([
+                        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+                    ])
+                if kind == 'dynamic':
+                    self._world_set_bit('block:dynamic')
+                    self._world_bump_type('block:dynamic')
+                    ll = payload.get('lit_len_code_lengths', {})
+                    shape_id = stable_str_hash(
+                        ''.join(f"{k}:{v}," for k, v in sorted(ll.items()))) if ll else 0
+                    axis = axis_from_id(int(shape_id & 0xFFFFFFFF))
+                    ang = 0.2
+                    q = qmul(q_from_axis_angle(axis, ang), q)
+                elif kind == 'static':
+                    self._world_set_bit('block:static')
+                    self._world_bump_type('block:static')
+                    axis = np.array([1.0, 0.0, 0.0])
+                    ang = 0.05
+                    q = qmul(q_from_axis_angle(axis, ang), q)
+                else:
+                    # stored or unknown: identity
+                    self._world_set_bit('block:stored')
+                    self._world_bump_type('block:stored')
+                    pass
+            if ev_type == 'atom' and isinstance(payload, dict):
+                self._world_set_bit('ev:atom')
+                self._world_bump_type('ev:atom')
+                atom_label = str(payload.get(
+                    'label', f"atom_{int(payload.get('id', 0)):x}"))[:48]
+                self._ensure_symbol_exists(atom_label)
+                self.grammar.unigram_counts[atom_label] += 1
+                self.grammar.semantic_alleles[atom_label] = q.copy()
+                self.minted_symbols.append(atom_label)
+                self.last_minted_symbol = atom_label
+                self.carry_ce1['∑'] += 1
+                self._push_color(0, 0.1)
                 if angle > 0:
                     all_deltas.append(angle)
+                minted_in_asset += 1
+                surp['Ω'] += 1
+            elif ev_type == 'literal':
+                self._world_set_bit('ev:literal')
+                self._world_bump_type('ev:literal')
+                surp['s'] += 1
+            elif ev_type == 'match':
+                self._world_set_bit('ev:match')
+                self._world_bump_type('ev:match')
+                surp['Δ'] += 1
+            elif ev_type == 'phase':
+                self._world_set_bit('ev:phase')
+                self._world_bump_type('ev:phase')
+                surp['S'] += 1
+            elif ev_type == 'summary' and isinstance(payload, dict):
+                self._world_set_bit('ev:summary')
+                self._world_bump_type('ev:summary')
+                glyph_counts = payload.get('glyphs')
+                if glyph_counts:
+                    last_counts = glyph_counts
+                    # carry cycles from block processor
+                    try:
+                        cyc = int(glyph_counts.get('∞', 0))
+                        if cyc:
+                            self.carry_ce1['∞'] += cyc
+                    except Exception:
+                        pass
+                    # Combine error glyphs with surprise bands
+                    try:
+                        err = Aspirate(glyph_counts)
+                        combined = err.overlay_with(surp)
+                        last_glyphs = str(combined)
+                    except Exception:
+                        last_glyphs = counts_render(
+                            glyph_counts, ops=[sort_by_count(False)], style='tight', omit_ones=True)
 
-        logger.info(f"Finished run on asset '{asset_name}'.")
-        return {'final_q': q, 'final_qs': final_qs, 'color_trail': self.color_trail, 'stats': {}}
+        # Single-line per-asset summary (from last summary event if any)
+        glyphs = last_glyphs or '∅'
+        # Modernized stats
+        hsv = (0.0, 0.0, 0.0)
+        if last_counts is not None:
+            try:
+                hsv = counts_to_color(last_counts)
+            except Exception:
+                pass
+        # Update world aggregate stats
+        try:
+            w = self._active_world()
+            w['size'] = int(w.get('size', 0)) + int(events_in_asset)
+            w['color'] = tuple(float(x) for x in hsv)
+            w['last_at'] = int(time.time())
+        except Exception:
+            pass
+        stats = {'mean_surprise': 0.0, 'std_surprise': 0.0,
+                 'atoms': minted_in_asset, 'glyphs': glyphs, 'glyph_counts': (last_counts or {}), 'color': hsv}
+        # inject CE1 carry into result for potential rendering
+        stats['carry_ce1'] = dict(self.carry_ce1)
+        return {'final_q': q, 'final_qs': final_qs, 'color_trail': self.color_trail, 'stats': stats}
 
     def _fuse_tokens(self, token_a: str, token_b: str):
         """Merges two tokens into a new, higher-level token (a 'molecule')."""

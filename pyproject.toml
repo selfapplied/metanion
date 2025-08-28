@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "bitstring>=4.3.1",
+    "isal>=1.7.2",
     "msgpack>=1.1.1",
     "numpy>=2.3.2",
+    "tqdm>=4.67.1",
 ]
 
 [dependency-groups]

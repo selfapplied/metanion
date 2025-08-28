@@ -1,5 +1,6 @@
-import struct
 from dataclasses import dataclass, field, asdict
+import os
+import dataclasses
 from typing import Dict, List, Set, Any, Optional
 from collections import Counter, defaultdict
 import numpy as np
@@ -7,6 +8,9 @@ import pickle
 import msgpack
 import zipfile
 import io
+from deflate import extract_zip_deflate_streams
+from aspire import Aspirate, stable_str_hash
+import re
 
 # --- Configuration Dataclasses ---
 
@@ -48,28 +52,52 @@ class Genome:
     config: EngineConfig
     grammar: Grammar
     extra_assets: Dict[str, bytes] = field(default_factory=dict)
-    compressed_assets: Dict[str, bytes] = field(default_factory=dict)
+    compressed_assets: Dict[str, Dict] = field(default_factory=dict)
+    alerts: Aspirate = field(default_factory=Aspirate)
+    # Registry keys (lowercase)
+    reg_opx: str = 'registry/opx.mpk'
+    reg_opt: str = 'registry/opt.mpk'
+    reg_sym: str = 'registry/sym.mpk'
+    reg_wor: str = 'registry/worlds.mpk'
 
     def save(self, path: str):
         """Saves the genome to a zip archive."""
-        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Serialize config and grammar
-            config_dict = asdict(self.config)
-            config_bytes = msgpack.packb(config_dict, use_bin_type=True) or b''
-            zf.writestr('config.msgpack', config_bytes)
-            
-            grammar_dict = {
-                'unigram_counts': dict(self.grammar.unigram_counts),
-                'bigram_counts': {k: dict(v) for k, v in self.grammar.bigram_counts.items()},
-                'byte_classes': {str(k): v for k, v in self.grammar.byte_classes.items()} # Convert keys to strings
-            }
-            grammar_bytes = msgpack.packb(grammar_dict, use_bin_type=True) or b''
-            zf.writestr('grammar.msgpack', grammar_bytes)
+        # Merge-preserving save: retain existing entries not being overwritten
+        existing: Dict[str, bytes] = {}
+        if os.path.exists(path):
+            try:
+                with zipfile.ZipFile(path, 'r') as old:
+                    for n in old.namelist():
+                        try:
+                            existing[n] = old.read(n)
+                        except Exception:
+                            pass
+            except Exception:
+                existing = {}
 
-            # Write any extra assets
-            for name, data in self.extra_assets.items():
-                if name not in ['config.msgpack', 'grammar.msgpack']:
-                    zf.writestr(name, data)
+        # Prepare new/updated entries
+        new_entries: Dict[str, bytes] = dict(existing)
+
+        # Serialize config and grammar
+        config_dict = asdict(self.config)
+        new_entries['config.msgpack'] = msgpack.packb(
+            config_dict, use_bin_type=True) or b''
+
+        grammar_dict = dataclasses.asdict(self.grammar)
+        new_entries['grammar.msgpack'] = msgpack.packb(
+            grammar_dict, use_bin_type=True) or b''
+
+        # Write/overwrite any extra assets in-memory
+        for name, data in self.extra_assets.items():
+            if name not in ('config.msgpack', 'grammar.msgpack') and isinstance(data, (bytes, bytearray, memoryview)):
+                new_entries[name] = bytes(data)
+
+        # Emit merged ZIP
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for name, data in new_entries.items():
+                # Best-effort: only write bytes-like
+                if isinstance(data, (bytes, bytearray, memoryview)):
+                    zf.writestr(name, bytes(data))
 
     @classmethod
     def from_path(cls, path: str) -> 'Genome':
@@ -88,43 +116,153 @@ class Genome:
                 stochastic_seed=config_dict['stochastic_seed']
             )
 
-            # Deserialize grammar
-            grammar_dict = msgpack.unpackb(zf.read('grammar.msgpack'), raw=False)
-            grammar = Grammar(
-                unigram_counts=Counter(grammar_dict['unigram_counts']),
-                bigram_counts=defaultdict(Counter, {k: Counter(v) for k, v in grammar_dict['bigram_counts'].items()}),
-                byte_classes={int(k): v for k, v in grammar_dict['byte_classes'].items()} # Convert keys back to ints
-            )
-            
-            # Load extra assets (decompressed) and capture raw compressed bytes via local headers
-            extra_assets = {}
-            compressed_assets = {}
-            # Open the underlying file for raw access
-            with open(path, 'rb') as f:
-                for info in zf.infolist():
-                    name = info.filename
-                    if name in ['config.msgpack', 'grammar.msgpack']:
-                        continue
-                    # Decompressed content
-                    extra_assets[name] = zf.read(name)
-                    # Raw compressed content (if deflated)
-                    try:
-                        if info.compress_type == zipfile.ZIP_DEFLATED:
-                            # Parse local header to find data offset
-                            f.seek(info.header_offset)
-                            hdr = f.read(30)
-                            if len(hdr) == 30:
-                                sig, ver, flag, comp, mt, md, crc32, comp_size, file_size, nlen, xlen = \
-                                    struct.unpack('<IHHHHHIIIHH', hdr)
-                                if sig == 0x04034b50:
-                                    f.seek(info.header_offset + 30 + nlen + xlen)
-                                    raw = f.read(info.compress_size)
-                                    if raw:
-                                        compressed_assets[name] = raw
-                    except Exception:
-                        pass
+            # Deserialize grammar (fallback if missing)
+            alerts = Aspirate()
+            try:
+                grammar_bytes = zf.read('grammar.msgpack')
+                # Be resilient to non-hashable keys and odd encodings
+                try:
+                    grammar_dict = msgpack.unpackb(
+                        grammar_bytes, raw=False, strict_map_key=False)
+                except TypeError:
+                    # older msgpack may not support strict_map_key; retry without
+                    grammar_dict = msgpack.unpackb(grammar_bytes, raw=False)
+                if not isinstance(grammar_dict, dict):
+                    raise ValueError('grammar.msgpack is not a dict')
+                ug = grammar_dict.get('unigram_counts', {}) or {}
+                bg = grammar_dict.get('bigram_counts', {}) or {}
+                bc = grammar_dict.get('byte_classes', {}) or {}
+                if not isinstance(ug, dict) or not isinstance(bg, dict) or not isinstance(bc, dict):
+                    raise ValueError('grammar fields malformed')
+                grammar = Grammar(
+                    unigram_counts=Counter(ug),
+                    bigram_counts=defaultdict(
+                        Counter, {k: Counter(v) for k, v in bg.items()}),
+                    byte_classes={int(k): v for k, v in bc.items()}
+                )
+            except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
+                print(
+                    "[WARN] Γ missing 'grammar.msgpack' in genome; starting with empty grammar")
+                alerts['Γ'] += 1
+                grammar = Grammar()
 
-        return cls(config=config, grammar=grammar, extra_assets=extra_assets, compressed_assets=compressed_assets)
+            # Load extra assets with ZIP-aware deflate handling
+            extra_assets, compressed_assets = extract_zip_deflate_streams(path)
+
+        return cls(config=config, grammar=grammar, extra_assets=extra_assets, compressed_assets=compressed_assets, alerts=alerts)
+
+    # --- Shallow grammar builder (fallback when grammar is absent/empty) ---
+    def build_shallow_grammar(self, max_bytes_per_asset: int = 32768) -> None:
+        """Builds a minimal grammar from asset contents and names (shallow)."""
+        word_re = re.compile(r"[A-Za-z0-9_]+")
+        unig = self.grammar.unigram_counts
+        bigr = self.grammar.bigram_counts
+        # From file contents
+        for name, data in self.extra_assets.items():
+            if not data:
+                continue
+            try:
+                text = data[:max_bytes_per_asset].decode(
+                    'utf-8', errors='ignore')
+            except Exception:
+                continue
+            tokens = word_re.findall(text)
+            prev = None
+            for tok in tokens:
+                unig[tok] += 1
+                if prev is not None:
+                    bigr[prev][tok] += 1
+                prev = tok
+        # From file names (path parts and stems)
+        for name in self.extra_assets.keys():
+            parts = re.split(r"[/\\]+", name)
+            for p in parts:
+                stem = re.sub(r"\.[^.]+$", "", p)
+                if stem:
+                    unig[stem] += 1
+        # Ensure defaults if still empty
+        if not unig:
+            unig.update({"carry": 1, "borrow": 1, "drift": 1})
+
+    # --- Registry helpers (store under 'registry/' in ZIP) ---
+    def registry_list(self, prefix: str = 'registry/') -> List[str]:
+        return sorted([k for k in self.extra_assets.keys() if k.startswith(prefix)])
+
+    def registry_get(self, name: str, *, text: bool = False, encoding: str = 'utf-8') -> Optional[Any]:
+        key = name if name.startswith('registry/') else f'registry/{name}'
+        blob = self.extra_assets.get(key)
+        if blob is None:
+            return None
+        if text:
+            try:
+                return blob.decode(encoding)
+            except Exception:
+                return None
+        return blob
+
+    def registry_set(self, name: str, data: Any, *, encoding: str = 'utf-8') -> None:
+        key = name if name.startswith('registry/') else f'registry/{name}'
+        if isinstance(data, str):
+            payload = data.encode(encoding)
+        elif isinstance(data, (bytes, bytearray, memoryview)):
+            payload = bytes(data)
+        else:
+            raise TypeError('registry_set expects str or bytes-like data')
+        self.extra_assets[key] = payload
+
+    def registry_delete(self, name: str) -> bool:
+        key = name if name.startswith('registry/') else f'registry/{name}'
+        return self.extra_assets.pop(key, None) is not None
+
+    # --- Aspirate carry (module-owned shape) ---
+    def carry(self) -> Aspirate:
+        """Genome-owned compact carry: assets and alerts folded into an Aspirate."""
+        try:
+            # Count non-meta assets
+            asset_names = [
+                n for n in self.extra_assets.keys()
+                if n not in ('config.msgpack', 'grammar.msgpack') and not n.startswith('registry/')
+            ]
+        except Exception:
+            asset_names = []
+        c = Aspirate()
+        try:
+            if asset_names:
+                c['§'] += len(asset_names)
+        except Exception:
+            pass
+        # Grammar footprint and signature
+        try:
+            ug = self.grammar.unigram_counts
+            bg = self.grammar.bigram_counts
+            alleles = self.grammar.semantic_alleles
+            vocab = len(ug)
+            tokens = sum(ug.values())
+            edges = sum(len(row) for row in bg.values())
+            allele_n = len(alleles)
+            if tokens:
+                c['μ'] += int(tokens)
+            if vocab:
+                c['ν'] += int(vocab)
+            if edges:
+                c['β'] += int(edges)
+            if allele_n:
+                c['ψ'] += int(allele_n)
+            # Lightweight signature over top-32 unigrams
+            top = sorted(ug.items(), key=lambda kv: kv[1], reverse=True)[:32]
+            sig_src = ''.join(f"{k}:{v}," for k, v in top)
+            sig = stable_str_hash(sig_src) if top else 0
+            sig_hex = f"{sig & 0xFFFFFFFF:08x}"
+            c[f"◇{sig_hex}"] += 1
+        except Exception:
+            pass
+        try:
+            # Overlay existing alerts (already an Aspirate)
+            if isinstance(self.alerts, Aspirate):
+                c = c.overlay_with(self.alerts)
+        except Exception:
+            pass
+        return c
 
     @staticmethod
     def _create_byte_sphere() -> np.ndarray:

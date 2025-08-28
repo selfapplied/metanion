@@ -3,7 +3,7 @@ import argparse
 import os
 import sys
 from collections import Counter, defaultdict
-from ce1_genome import Genome, EngineConfig, Grammar
+from genome import Genome, EngineConfig, Grammar
 import py_compile
 import zipfile
 from typing import Optional
@@ -16,63 +16,12 @@ import isal.isal_zlib
 import hashlib
 from tqdm import tqdm
 from bitstring import ConstBitStream, ReadError
+# Note: deflate helpers not needed here; removed stale import
 
 # --- Helper Functions ---
 
-def _build_huffman_tree(code_lengths):
-    """Builds a canonical Huffman decoding tree from a list of code lengths."""
-    tree = {}
-    max_len = max(code_lengths.values()) if code_lengths else 0
-    
-    bl_count = {i: 0 for i in range(max_len + 1)}
-    for length in code_lengths.values():
-        if length > 0:
-            bl_count[length] += 1
-    
-    next_code = {0: 0}
-    for bits in range(1, max_len + 1):
-        next_code[bits+1] = (next_code[bits] + bl_count[bits]) << 1
 
-    for symbol in sorted(code_lengths.keys()):
-        length = code_lengths[symbol]
-        if length != 0:
-            code = next_code[length]
-            bits = f'{code:0{length}b}'
-            tree[bits] = symbol
-            next_code[length] += 1
-            
-    return tree
-
-def _read_huffman_payload(stream, lit_len_tree, dist_tree, output_buffer):
-    """Decodes the actual payload using the provided Huffman trees."""
-    tokens = []
-    while True:
-        # This is a placeholder for a more efficient bit-by-bit tree traversal
-        # For now, we read a few bits and try to match
-        code = ""
-        symbol = None
-        while symbol is None:
-            if stream.pos == len(stream): break
-            code += stream.read('bin:1')
-            if code in lit_len_tree:
-                symbol = lit_len_tree[code]
-
-        if symbol is None: break
-
-        if symbol < 256: # Literal
-            token = bytes([symbol])
-            tokens.append(token)
-            output_buffer.append(symbol)
-        elif symbol == 256: # End of Block
-            break
-        else: # Length/Distance pair
-            # This part is highly complex, involving reading extra bits for length and distance
-            # and then copying from the output_buffer. This is a major undertaking.
-            # For now, we acknowledge the back-ref without fully decoding it.
-            pass
-    return tokens
-
-def create_genesis(sources: list, output_path: str, recursive: bool, include_all: bool):
+def create_genesis(sources: list, output_path: str, recursive: bool, include_all: bool, bootstrap: bool = True):
     """Creates a new genesis genome from source files and directories."""
     print(f"Creating genesis genome and saving to '{output_path}'...")
     
@@ -140,14 +89,20 @@ def create_genesis(sources: list, output_path: str, recursive: bool, include_all
                         except Exception as e:
                             print(f"Warning: Could not read file '{file_path}': {e}")
 
-    # 3. Create an empty genesis grammar.
-    # All grammar discovery will now happen inside the VM at runtime.
-    print("Creating empty genesis grammar...")
+    # 3. Create a genesis grammar (optionally bootstrap from assets).
+    if bootstrap:
+        print("Bootstrapping shallow grammar from assets...")
+    else:
+        print("Creating empty genesis grammar...")
     grammar = Grammar()
     
     # 4. Assemble and Save the Genome
     genesis_genome = Genome(config=config, grammar=grammar, extra_assets=extra_assets)
-    
+    if bootstrap:
+        try:
+            genesis_genome.build_shallow_grammar()
+        except Exception as e:
+            print(f"Warning: bootstrap grammar failed: {e}")
     genesis_genome.save(output_path)
     print("Done.")
 
