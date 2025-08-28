@@ -1,0 +1,19 @@
+[project]
+name = "eonyx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bitstring>=4.3.1",
+    "msgpack>=1.1.1",
+    "numpy>=2.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "eonyx",
+]
+
+[tool.uv.sources]
+eonyx = { workspace = true }
