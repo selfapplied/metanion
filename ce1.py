@@ -739,7 +739,12 @@ class CE1Core:
             )
             rotation_q = get_rotation_from_block(event, self.genome)
             if rotation_q is not None:
-                q = quaternion.quat_mul(rotation_q, q)
+                # derive angle from rotation quaternion w component
+                w = float(rotation_q[0])
+                w = float(np.clip(w, -1.0, 1.0))
+                ang = float(2.0 * math.acos(w))
+                q = self._enter_branch(
+                    level=0, q=q, angle=ang, q_rot=rotation_q, direction=1)
 
         elif kind == 'static':
             self._world_set_bit('block:static')
@@ -747,7 +752,8 @@ class CE1Core:
             axis = np.array([1.0, 0.0, 0.0])
             ang = 0.05
             rotation_q = quaternion.axis_angle_quat(axis, ang)
-            q = quaternion.quat_mul(rotation_q, q)
+            q = self._enter_branch(level=0, q=q, angle=float(
+                abs(ang)), q_rot=rotation_q, direction=1)
         else:  # stored or unknown
             self._world_set_bit('block:stored')
             self._world_bump_type('block:stored')
@@ -838,18 +844,13 @@ class CE1Core:
                         combined = err.overlay_with(surp)
                         last_glyphs = str(combined)
                     except Exception:
-                        last_glyphs = counts_render(
-                            glyph_counts, ops=[sort_by_count(False)], style='tight', omit_ones=True)
+                        last_glyphs = ' '.join(f"{k}:{v}" for k, v in sorted(
+                            glyph_counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))))
 
         # Single-line per-asset summary (from last summary event if any)
         glyphs = last_glyphs or '∅'
         # Modernized stats
         hsv = (0.0, 0.0, 0.0)
-        if last_counts is not None:
-            try:
-                hsv = counts_to_color(last_counts)
-            except Exception:
-                pass
         # Update world aggregate stats
         try:
             w = self._active_world()
@@ -904,9 +905,14 @@ class CE1Core:
         output_sequence = [current_token]
 
         # --- Choreographed Walk ---
-        # The color_trail is a list of lists (one for each level). We use the final level's trail.
+        # Use the deepest non-empty color trail across levels.
         color_trail = transformed_state.get('color_trail', [])
-        final_level_trail = color_trail[-1] if color_trail else []
+        final_level_trail = []
+        if isinstance(color_trail, list) and color_trail:
+            for lvl in range(len(color_trail) - 1, -1, -1):
+                if color_trail[lvl]:
+                    final_level_trail = color_trail[lvl]
+                    break
 
         if not final_level_trail:
             logger.warning("No color trail found, using final quaternion for a simple walk.")
@@ -942,6 +948,19 @@ class CE1Core:
             novelty_scores = np.array([1.0 - (self.genome.grammar.unigram_counts.get(t, 0) / unigram_total) for t in tokens], dtype=np.float32)
             
             combined_scores = (common_bias * np.log(base_probs + 1e-9)) + (novel_bias * np.log(novelty_scores + 1e-9))
+
+            # Common-prefix boost → treat as saturation-driven attraction (green bias guidance)
+            def _cpl(a: str, b: str) -> int:
+                m = min(len(a), len(b))
+                i = 0
+                while i < m and a[i] == b[i]:
+                    i += 1
+                return i
+            prefix_raw = np.array([_cpl(current_token, t)
+                                  for t in tokens], dtype=np.float32)
+            if prefix_raw.size and float(prefix_raw.max()) > 0.0:
+                prefix_scores = prefix_raw / float(prefix_raw.max())
+                combined_scores = combined_scores + (s * prefix_scores)
             
             probabilities = np.exp(combined_scores / temperature)
             probabilities /= np.sum(probabilities)

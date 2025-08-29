@@ -11,7 +11,7 @@ from typing import Optional
 from aspire import load_opix_registry, Opix
 
 
-def _report_run_summary(engine: CE1Core, total_stats: list):
+def _report_run_summary(engine: CE1Core, total_stats: list, last_result: Optional[dict] = None):
     """Generates a run summary by feeding the final state to the engine itself."""
     genome = engine.genome
 
@@ -77,8 +77,9 @@ def _report_run_summary(engine: CE1Core, total_stats: list):
         prompt = "[SYSTEM_SUMMARY]"  # Fallback
 
     # 4. Generate the report.
-    # The 'last_result' isn't available here, so we create a neutral start state.
-    start_state = {'final_qs': [[1.0, 0.0, 0.0, 0.0]], 'color_trail': []}
+    # Prefer the actual last_result state if available; fallback to neutral.
+    start_state = last_result if isinstance(last_result, dict) else {'final_qs': [
+        [1.0, 0.0, 0.0, 0.0]], 'color_trail': []}
     print("\nSummary:")
     report = engine.generate_text(prompt, start_state)
     print(report)
@@ -124,7 +125,7 @@ def log(level, message):
 
 def render_epilogue(engine: CE1Core, total_stats: list, last_result: Optional[dict], seed_text: Optional[str], genome_path: str):
     """Renders the final summary and generative output after a genome run."""
-    _report_run_summary(engine, total_stats)
+    _report_run_summary(engine, total_stats, last_result)
     _persist_learning(engine, genome_path)
     # The _generate_output function is now obsolete, as the summary is generative.
     # _generate_output(engine, last_result, seed_text)
