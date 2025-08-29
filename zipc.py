@@ -95,8 +95,12 @@ def create_genesis(sources: list, output_path: str, recursive: bool, include_all
     else:
         print("Creating empty genesis grammar...")
     grammar = Grammar()
-    
-    # 4. Assemble and Save the Genome
+
+    # 4. Add a default report prompt
+    report_prompt = "[SYSTEM_SUMMARY]"
+    extra_assets['registry/report.txt'] = report_prompt.encode('utf-8')
+
+    # 5. Assemble and Save the Genome
     genesis_genome = Genome(config=config, grammar=grammar, extra_assets=extra_assets)
     if bootstrap:
         try:

@@ -15,7 +15,7 @@ from aspire import (
     extract_qnan_payload,
     counts_render,
     sort_by_count,
-    Aspirate,
+    Opix,
 )
 
 
@@ -286,8 +286,6 @@ def extract_zip_deflate_streams(zip_path: str) -> Tuple[Dict[str, bytes], Dict[s
         with open(zip_path, 'rb') as f:
             for info in zf.infolist():
                 name = info.filename
-                if name in ['config.msgpack', 'grammar.msgpack']:
-                    continue
 
                 # Always get decompressed content for processing
                 extra_assets[name] = zf.read(name)
@@ -415,7 +413,7 @@ class BlockProcessor:
         # Convert bytes to bits for bounds checking
         self.max_pos = len(self.stream.bytes) * 8
         # Error counters per asset as an Aspirate (Counter-like)
-        self.error_counts: Counter = Aspirate(
+        self.error_counts: Counter = Opix(
             heap=[], length_hist=Counter(), shape_id=0, max_bits=0)
         # Lightweight cycle detection
         self._error_window: List[str] = []

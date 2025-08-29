@@ -28,6 +28,14 @@ def stable_str_hash(s: str) -> int:
     return h
 
 
+def stable_bytes_hash(b: bytes) -> int:
+    h = 0
+    for byte in b:
+        h = (h + byte) & MASK64
+        h = mix64(h)
+    return h
+
+
 def pack_qnan_with_payload(payload_51bits: int) -> float:
     payload = payload_51bits & ((1 << 51) - 1)
     bits = (0x7ff << 52) | (1 << 51) | payload
@@ -410,7 +418,7 @@ def build_heap_decoder(code_lengths: Dict[int, int]) -> List[Dict[str, Optional[
     return nodes
 
 
-class Aspirate(Counter):
+class Opix(Counter):
     def __init__(
         self,
         counts: Optional[Mapping[str, float] | Iterable[str]] = None,
@@ -428,66 +436,66 @@ class Aspirate(Counter):
         self.max_bits = int(max_bits)
 
     # --- Callable-friendly API ---
-    def apply(self, *ops: Callable[[Mapping[str, float]], Dict[str, float]], inplace: bool = False) -> 'Aspirate':
+    def apply(self, *ops: Callable[[Mapping[str, float]], Dict[str, float]], inplace: bool = False) -> 'Opix':
         new_map = apply_ops(self, ops)
         if inplace:
             self.clear()
             self.update(new_map)
             return self
-        return Aspirate(new_map, heap=self.heap, length_hist=self.length_hist, shape_id=self.shape_id, max_bits=self.max_bits)
+        return Opix(new_map, heap=self.heap, length_hist=self.length_hist, shape_id=self.shape_id, max_bits=self.max_bits)
 
-    def __call__(self, *ops: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Aspirate':
+    def __call__(self, *ops: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Opix':
         return self.apply(*ops, inplace=False)
 
-    def __rshift__(self, op: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Aspirate':
+    def __rshift__(self, op: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Opix':
         return self.apply(op, inplace=False)
 
-    def __irshift__(self, op: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Aspirate':
+    def __irshift__(self, op: Callable[[Mapping[str, float]], Dict[str, float]]) -> 'Opix':
         return self.apply(op, inplace=True)
 
     # --- Combo convenience ---
-    def overlay_with(self, *others: 'Aspirate') -> 'Aspirate':
-        merged = Aspirate(self)
+    def overlay_with(self, *others: 'Opix') -> 'Opix':
+        merged = Opix(self)
         for op in others:
             for g, n in op.items():
                 if n:
                     merged[g] += n
         return merged
 
-    def hstack(self, *others: 'Aspirate', separator: str = ' ', format_spec: str = '') -> str:
+    def hstack(self, *others: 'Opix', separator: str = ' ', format_spec: str = '') -> str:
         parts = [format(self, format_spec) if format_spec else str(self)]
         for op in others:
             parts.append(format(op, format_spec) if format_spec else str(op))
         return separator.join(parts)
 
-    def vstack(self, *others: 'Aspirate', separator: str = ' ', format_spec: str = '') -> str:
+    def vstack(self, *others: 'Opix', separator: str = ' ', format_spec: str = '') -> str:
         parts = [format(self, format_spec) if format_spec else str(self)]
         for op in others:
             parts.append(format(op, format_spec) if format_spec else str(op))
         return "\n".join(parts)
 
-    def blend_with(self, *others: 'Aspirate', separator: str = ' ', format_spec: str = '') -> str:
+    def blend_with(self, *others: 'Opix', separator: str = ' ', format_spec: str = '') -> str:
         parts = [f"[{format(self, format_spec) if format_spec else str(self)}]"]
         for op in others:
             parts.append(f"[{format(op, format_spec) if format_spec else str(op)}]")
         return separator.join(parts)
 
     @staticmethod
-    def from_code_lengths(code_lengths: Dict[int, int]) -> 'Aspirate':
+    def from_code_lengths(code_lengths: Dict[int, int]) -> 'Opix':
         heap = build_heap_decoder(code_lengths)
         hist = Counter(int(L) for L in code_lengths.values() if int(L) > 0)
         acc = 0
         for L, cnt in sorted(hist.items()):
             acc = mix64(acc + mix64((L << 16) | (cnt & 0xFFFF)))
         max_bits = max(code_lengths.values()) if code_lengths else 0
-        return Aspirate(heap=heap, length_hist=hist, shape_id=acc & MASK64, max_bits=int(max_bits))
+        return Opix(heap=heap, length_hist=hist, shape_id=acc & MASK64, max_bits=int(max_bits))
 
     def color(self) -> Tuple[float, float, float]:
         base = self if len(self) else self.length_hist
         return counts_to_color(base)  # reuse mapping logic
 
     @staticmethod
-    def from_heap(heap: List[Dict[str, Optional[int]]], code_lengths: Optional[Dict[int, int]] = None) -> 'Aspirate':
+    def from_heap(heap: List[Dict[str, Optional[int]]], code_lengths: Optional[Dict[int, int]] = None) -> 'Opix':
         # If code_lengths are provided, compute histogram/id; else minimal metadata
         if code_lengths:
             hist = Counter(int(L) for L in code_lengths.values() if int(L) > 0)
@@ -499,7 +507,8 @@ class Aspirate(Counter):
             hist = Counter()
             acc = 0
             max_bits = 0
-        a = Aspirate(heap=heap, length_hist=hist, shape_id=acc & MASK64, max_bits=int(max_bits))
+        a = Opix(heap=heap, length_hist=hist, shape_id=acc &
+                 MASK64, max_bits=int(max_bits))
         return a
 
     def __str__(self) -> str:
@@ -565,7 +574,7 @@ class Aspirate(Counter):
 
 
 # Alias for ergonomics
-Opix = Aspirate
+Opix = Opix
 
 
 ## OpixCombo removed: use Aspirate.overlay_with() to merge, and hstack()/vstack()/blend_with() to render strings

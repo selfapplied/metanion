@@ -8,9 +8,38 @@ import pickle
 import msgpack
 import zipfile
 import io
+from collections.abc import Buffer
 from deflate import extract_zip_deflate_streams
-from aspire import Aspirate, stable_str_hash
+from aspire import Opix, stable_str_hash, stable_bytes_hash
 import re
+
+import quaternion
+
+
+def grammar_healer_hook(pairs):
+    """
+    A msgpack hook that intelligently converts dictionary-like structures into
+    the appropriate Counter or defaultdict types for the grammar, and heals
+    old list-based keys into hashable tuples.
+    """
+    healed_pairs = []
+    for key, value in pairs:
+        match key:
+            case list() as l:
+                healed_pairs.append((tuple(l), value))
+            case _:
+                healed_pairs.append((key, value))
+
+    # Heuristic for bigram_counts outer dict: keys are tuples
+    if healed_pairs and all(isinstance(k, tuple) for k, v in healed_pairs):
+        return defaultdict(Counter, {k: Counter(v) for k, v in healed_pairs})
+
+    # Heuristic for Counter objects: values are numbers
+    if healed_pairs and all(isinstance(v, (int, float)) for k, v in healed_pairs):
+        return Counter(dict(healed_pairs))
+
+    return dict(healed_pairs)
+
 
 # --- Configuration Dataclasses ---
 
@@ -45,6 +74,7 @@ class Grammar:
     byte_classes: Dict[int, int] = field(default_factory=dict)
     semantic_alleles: Dict[str, np.ndarray] = field(default_factory=dict)
 
+
 # --- Genome: The Complete State of a Learner ---
 
 @dataclass
@@ -53,8 +83,10 @@ class Genome:
     grammar: Grammar
     extra_assets: Dict[str, bytes] = field(default_factory=dict)
     compressed_assets: Dict[str, Dict] = field(default_factory=dict)
-    alerts: Aspirate = field(default_factory=Aspirate)
-    # Registry keys (lowercase)
+    alerts: Opix = field(default_factory=Opix)
+    # Registry keys (lowercase, .mpk for msgpack)
+    reg_cfg: str = 'registry/config.mpk'
+    reg_gram: str = 'registry/grammar.mpk'
     reg_opx: str = 'registry/opx.mpk'
     reg_opt: str = 'registry/opt.mpk'
     reg_sym: str = 'registry/sym.mpk'
@@ -62,94 +94,109 @@ class Genome:
 
     def save(self, path: str):
         """Saves the genome to a zip archive."""
-        # Merge-preserving save: retain existing entries not being overwritten
-        existing: Dict[str, bytes] = {}
-        if os.path.exists(path):
-            try:
-                with zipfile.ZipFile(path, 'r') as old:
-                    for n in old.namelist():
-                        try:
-                            existing[n] = old.read(n)
-                        except Exception:
-                            pass
-            except Exception:
-                existing = {}
-
-        # Prepare new/updated entries
-        new_entries: Dict[str, bytes] = dict(existing)
-
-        # Serialize config and grammar
-        config_dict = asdict(self.config)
-        new_entries['config.msgpack'] = msgpack.packb(
-            config_dict, use_bin_type=True) or b''
-
-        grammar_dict = dataclasses.asdict(self.grammar)
-        new_entries['grammar.msgpack'] = msgpack.packb(
-            grammar_dict, use_bin_type=True) or b''
-
-        # Write/overwrite any extra assets in-memory
-        for name, data in self.extra_assets.items():
-            if name not in ('config.msgpack', 'grammar.msgpack') and isinstance(data, (bytes, bytearray, memoryview)):
-                new_entries[name] = bytes(data)
-
-        # Emit merged ZIP
         with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for name, data in new_entries.items():
-                # Best-effort: only write bytes-like
-                if isinstance(data, (bytes, bytearray, memoryview)):
-                    zf.writestr(name, bytes(data))
+            # Write all assets first
+            for name, data in self.extra_assets.items():
+                if isinstance(data, Buffer):
+                    zf.writestr(name, data)
+
+            # Now, explicitly write the canonical config and grammar
+            config_dict = asdict(self.config)
+            zf.writestr(self.reg_cfg, msgpack.packb(
+                config_dict, use_bin_type=True) or b'')
+
+            grammar_dict = dataclasses.asdict(self.grammar)
+            zf.writestr(self.reg_gram, msgpack.packb(
+                grammar_dict, use_bin_type=True) or b'')
 
     @classmethod
     def from_path(cls, path: str) -> 'Genome':
         """Loads a genome from a zip archive."""
-        with zipfile.ZipFile(path, 'r') as zf:
-            # Deserialize config
-            config_dict = msgpack.unpackb(zf.read('config.msgpack'), raw=False)
-            seed_config = SeedConfig(**config_dict['seed'])
-            fractal_config = FractalConfig(**config_dict['fractal'])
+        all_assets, compressed_assets = extract_zip_deflate_streams(path)
+        alerts = Opix()
+        config = EngineConfig()
+        grammar = Grammar()
+
+        # Config: Try to load from canonical path, otherwise use default.
+        try:
+            config_bytes = all_assets.pop(cls.reg_cfg)
+            config_dict = msgpack.unpackb(config_bytes, raw=False)
+            seed_config = SeedConfig(**config_dict.get('seed', {}))
+            fractal_config = FractalConfig(**config_dict.get('fractal', {}))
             config = EngineConfig(
-                levels=config_dict['levels'],
-                symbols=config_dict['symbols'],
-                priors=config_dict['priors'],
+                levels=config_dict.get('levels', 4),
+                symbols=config_dict.get(
+                    'symbols', ["carry", "borrow", "drift"]),
+                priors=config_dict.get('priors', {}),
                 seed=seed_config,
                 fractal=fractal_config,
-                stochastic_seed=config_dict['stochastic_seed']
+                stochastic_seed=config_dict.get('stochastic_seed', 1337)
             )
+        except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
+            alerts['C!'] += 1  # Signal missing or corrupt config
 
-            # Deserialize grammar (fallback if missing)
-            alerts = Aspirate()
-            try:
-                grammar_bytes = zf.read('grammar.msgpack')
-                # Be resilient to non-hashable keys and odd encodings
-                try:
-                    grammar_dict = msgpack.unpackb(
-                        grammar_bytes, raw=False, strict_map_key=False)
-                except TypeError:
-                    # older msgpack may not support strict_map_key; retry without
-                    grammar_dict = msgpack.unpackb(grammar_bytes, raw=False)
-                if not isinstance(grammar_dict, dict):
-                    raise ValueError('grammar.msgpack is not a dict')
-                ug = grammar_dict.get('unigram_counts', {}) or {}
-                bg = grammar_dict.get('bigram_counts', {}) or {}
-                bc = grammar_dict.get('byte_classes', {}) or {}
-                if not isinstance(ug, dict) or not isinstance(bg, dict) or not isinstance(bc, dict):
-                    raise ValueError('grammar fields malformed')
-                grammar = Grammar(
-                    unigram_counts=Counter(ug),
-                    bigram_counts=defaultdict(
-                        Counter, {k: Counter(v) for k, v in bg.items()}),
-                    byte_classes={int(k): v for k, v in bc.items()}
-                )
-            except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
-                print(
-                    "[WARN] Γ missing 'grammar.msgpack' in genome; starting with empty grammar")
-                alerts['Γ'] += 1
-                grammar = Grammar()
+        # Grammar: Try to load from canonical path, otherwise use default.
+        try:
+            grammar_bytes = all_assets.pop(cls.reg_gram)
+            grammar_dict = msgpack.unpackb(
+                grammar_bytes, raw=False, object_pairs_hook=grammar_healer_hook)
+            if not isinstance(grammar_dict, dict):
+                raise ValueError('Grammar file is not a valid dictionary.')
 
-            # Load extra assets with ZIP-aware deflate handling
-            extra_assets, compressed_assets = extract_zip_deflate_streams(path)
+            ug = grammar_dict.get('unigram_counts', Counter())
+            bg = grammar_dict.get('bigram_counts', defaultdict(Counter))
+            bc = grammar_dict.get('byte_classes', {})
+            grammar = Grammar(
+                unigram_counts=ug,
+                bigram_counts=bg,
+                byte_classes={int(k): v for k, v in bc.items()}
+            )
+        except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
+            alerts['Γ'] += 1  # Signal missing or corrupt grammar
+
+        # Clean up any remaining legacy paths to create a clean asset list
+        legacy_paths = ['config.msgpack', 'grammar.msgpack',
+                        'registry/config.msgpack', 'registry/grammar.msgpack']
+        for p in legacy_paths:
+            all_assets.pop(p, None)
+
+        extra_assets = all_assets
 
         return cls(config=config, grammar=grammar, extra_assets=extra_assets, compressed_assets=compressed_assets, alerts=alerts)
+
+    # --- Aspirate carry (module-owned shape) ---
+    def carry(self) -> Opix:
+        """Genome-owned compact carry: assets and alerts folded into an Opix."""
+        c = Opix()
+
+        # Count non-meta assets
+        asset_names = [
+            n for n in self.extra_assets.keys()
+            if not n.startswith('registry/')
+        ]
+        c['§'] += len(asset_names)
+
+        # Grammar footprint and signature
+        ug = self.grammar.unigram_counts
+        bg = self.grammar.bigram_counts
+        alleles = self.grammar.semantic_alleles
+
+        c['μ'] += sum(ug.values())
+        c['ν'] += len(ug)
+        c['β'] += sum(len(row) for row in bg.values())
+        c['ψ'] += len(alleles)
+
+        # Lightweight signature over top-32 unigrams
+        top = sorted(ug.items(), key=lambda kv: kv[1], reverse=True)[:32]
+        sig_src = ''.join(f"{k}:{v}," for k, v in top)
+        sig = stable_str_hash(sig_src) if top else 0
+        sig_hex = f"{sig & 0xFFFFFFFF:08x}"
+        c[f"◇{sig_hex}"] += 1
+
+        # Overlay existing alerts
+        c = c.overlay_with(self.alerts)
+
+        return c
 
     # --- Shallow grammar builder (fallback when grammar is absent/empty) ---
     def build_shallow_grammar(self, max_bytes_per_asset: int = 32768) -> None:
@@ -213,56 +260,6 @@ class Genome:
     def registry_delete(self, name: str) -> bool:
         key = name if name.startswith('registry/') else f'registry/{name}'
         return self.extra_assets.pop(key, None) is not None
-
-    # --- Aspirate carry (module-owned shape) ---
-    def carry(self) -> Aspirate:
-        """Genome-owned compact carry: assets and alerts folded into an Aspirate."""
-        try:
-            # Count non-meta assets
-            asset_names = [
-                n for n in self.extra_assets.keys()
-                if n not in ('config.msgpack', 'grammar.msgpack') and not n.startswith('registry/')
-            ]
-        except Exception:
-            asset_names = []
-        c = Aspirate()
-        try:
-            if asset_names:
-                c['§'] += len(asset_names)
-        except Exception:
-            pass
-        # Grammar footprint and signature
-        try:
-            ug = self.grammar.unigram_counts
-            bg = self.grammar.bigram_counts
-            alleles = self.grammar.semantic_alleles
-            vocab = len(ug)
-            tokens = sum(ug.values())
-            edges = sum(len(row) for row in bg.values())
-            allele_n = len(alleles)
-            if tokens:
-                c['μ'] += int(tokens)
-            if vocab:
-                c['ν'] += int(vocab)
-            if edges:
-                c['β'] += int(edges)
-            if allele_n:
-                c['ψ'] += int(allele_n)
-            # Lightweight signature over top-32 unigrams
-            top = sorted(ug.items(), key=lambda kv: kv[1], reverse=True)[:32]
-            sig_src = ''.join(f"{k}:{v}," for k, v in top)
-            sig = stable_str_hash(sig_src) if top else 0
-            sig_hex = f"{sig & 0xFFFFFFFF:08x}"
-            c[f"◇{sig_hex}"] += 1
-        except Exception:
-            pass
-        try:
-            # Overlay existing alerts (already an Aspirate)
-            if isinstance(self.alerts, Aspirate):
-                c = c.overlay_with(self.alerts)
-        except Exception:
-            pass
-        return c
 
     @staticmethod
     def _create_byte_sphere() -> np.ndarray:

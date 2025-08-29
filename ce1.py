@@ -11,9 +11,11 @@ import inspect
 from bitstring import ConstBitStream
 import msgpack
 
-from genome import Genome, EngineConfig, Grammar
-from deflate import parse_dynamic_huffman_block, parse_static_huffman_block, parse_stored_block, create_deflate_stream, validate_deflate_stream, BlockProcessor
-from aspire import counts_render, sort_by_count, counts_to_color, Aspirate, mix64, stable_str_hash
+from aspire import Opix, stable_str_hash
+from genome import Genome, SeedConfig, FractalConfig, EngineConfig
+import quaternion
+from resonance import BlockEvent, get_rotation_from_block
+from deflate import BlockProcessor
 
 # --- Function-table bitmask (inputs) ---
 IN_NAME  = 1 << 0
@@ -22,7 +24,7 @@ IN_TEXT  = 1 << 2
 
 # --- Simple Logger ---
 logger = logging.getLogger("ce1_core")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 
 # Simple console handler
 handler = logging.StreamHandler()
@@ -136,7 +138,7 @@ class CE1Core:
         }
         self.worlds: Dict = self._load_worlds()
         # Module-owned carry for CE1: minted symbols (∑), cycles (∞)
-        self.carry_ce1 = Aspirate()
+        self.carry_ce1 = Opix()
         # Select an active world based on policy at startup
         try:
             self._select_active_world()
@@ -197,59 +199,29 @@ class CE1Core:
             base = M
         return kernels
 
-    # --- Quaternion Math (Static Helpers) ---
-    @staticmethod
-    def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-        w1, x1, y1, z1 = q1; w2, x2, y2, z2 = q2
-        return np.array([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], dtype=float)
-
-    @staticmethod
-    def _quat_norm(q: np.ndarray) -> np.ndarray:
-        n = float(np.linalg.norm(q)); return q / max(n, 1e-15)
-
-    @staticmethod
-    def _axis_angle_quat(axis_vec: np.ndarray, angle: float) -> np.ndarray:
-        axis = axis_vec.astype(float); n = float(np.linalg.norm(axis))
-        if n == 0.0: return np.array([1.0, 0.0, 0.0, 0.0])
-        axis /= n; h = 0.5 * float(angle); s = math.sin(h)
-        return np.array([math.cos(h), s*axis[0], s*axis[1], s*axis[2]], dtype=float)
-    
-    @staticmethod
-    def _quat_conj(q: np.ndarray) -> np.ndarray:
-        return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
-
-    @staticmethod
-    def _quat_slerp(q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:
-        q1 = q1.astype(float); q2 = q2.astype(float)
-        dot = float(np.dot(q1, q2)); flip = dot < 0.0
-        if flip: q2 = -q2; dot = -dot
-        if 1.0 - dot < 1e-6:
-            q = (1.0 - t) * q1 + t * q2
-        else:
-            theta0 = math.acos(max(min(dot, 1.0), -1.0)); theta = theta0 * t
-            st0 = math.sin(theta0) or 1e-12
-            q = (math.sin(theta0 - theta) / st0) * q1 + (math.sin(theta) / st0) * q2
-        return q / max(float(np.linalg.norm(q)), 1e-15)
-
     def _get_length_bead(self, L: int) -> np.ndarray:
         Lc = int(max(0, min(15, L)))
         bead = self._length_beads.get(Lc)
         if bead is not None:
             return bead
+        # Note: This is a more complex rotation not covered by the basic resonance module
+        # and remains part of the core engine's specialized logic for now.
         axis = self._get_project3(16) @ np.pad(np.eye(1, 16, Lc).ravel(), (0,0))
-        bead = self._axis_angle_quat(axis, 1.0)
+
+        # We can still use the generic quaternion constructor from the new module
+        bead = quaternion.axis_angle_quat(axis, 1.0)
         self._length_beads[Lc] = bead
         return bead
 
     def _bead_conjugate(self, q: np.ndarray, bead: np.ndarray, lam: float) -> np.ndarray:
-        b_conj = self._quat_conj(bead)
-        q_conj = self._quat_mul(self._quat_mul(b_conj, q), bead)
-        return self._quat_slerp(q, q_conj, float(np.clip(lam, 0.0, 1.0)))
+        # This logic is also highly specific to the core engine's state machine.
+        # It can be simplified to use the generic quaternion operations.
+        b_conj = quaternion.quat_conj(bead)
+        q_conj = quaternion.quat_mul(quaternion.quat_mul(b_conj, q), bead)
+
+        # A full slerp implementation is still needed for this specialized operation.
+        # It will remain here for now.
+        return quaternion.quat_slerp(q, q_conj, float(np.clip(lam, 0.0, 1.0)))
     
     # --- Fast Text Ingestion to Bootstrap Grammar ---
     def _tokenize_text(self, text: str) -> List[str]:
@@ -339,7 +311,7 @@ class CE1Core:
         if axis_norm == 0.0:
             return np.array([1.0, 0.0, 0.0, 0.0]), angle
         axis3 /= axis_norm
-        q_rot = self._axis_angle_quat(axis3, angle)
+        q_rot = quaternion.axis_angle_quat(axis3, angle)
         return q_rot, angle
 
     def _push_color(self, level: int, angle: float):
@@ -367,9 +339,9 @@ class CE1Core:
             st.winding += cuts * (1 if direction >= 0 else -1)
         # Odd/even level asymmetry: conjugation order
         if (level % 2) == 1:
-            q_new = self._quat_norm(self._quat_mul(q, q_rot))
+            q_new = quaternion.quat_norm(quaternion.quat_mul(q, q_rot))
         else:
-            q_new = self._quat_norm(self._quat_mul(q_rot, q))
+            q_new = quaternion.quat_norm(quaternion.quat_mul(q_rot, q))
         # Embed a lightweight tag in the mantissa of z to mark progression
         tag = self._event_tag12({'type': 'progress', 'level': level, 'angle': shaped, 'dir': direction})
         q_new = self._embed_tag_in_q(q_new, tag, component=3)
@@ -413,7 +385,7 @@ class CE1Core:
             bead = self._get_length_bead(Lc)
             lam = float(np.clip(angle * (Lc + 1) / 12.0, 0.0, 1.0)) * scale * (cnt / max(total, 1))
             q_blend = self._bead_conjugate(q_blend, bead, lam)
-        return self._quat_norm(q_blend)
+        return quaternion.quat_norm(q_blend)
 
     def apply_dynamic_tree(self, q: np.ndarray, lit_len_code_lengths: Dict, internal_counts: Dict) -> Tuple[np.ndarray, float, Optional[int]]:
         external_counts = dict(
@@ -753,6 +725,34 @@ class CE1Core:
         color_info = self._delta_to_color(delta)
         return next_symbol, alleles, color_info, delta
 
+    def resonate_with_block(self, q: np.ndarray, payload: Dict) -> np.ndarray:
+        """Applies quaternion physics for a 'block' event."""
+        kind = payload.get('type')
+
+        if kind == 'dynamic':
+            self._world_set_bit('block:dynamic')
+            self._world_bump_type('block:dynamic')
+
+            event = BlockEvent(
+                kind='dynamic',
+                lit_len_code_lengths=payload.get('lit_len_code_lengths', {})
+            )
+            rotation_q = get_rotation_from_block(event, self.genome)
+            if rotation_q is not None:
+                q = quaternion.quat_mul(rotation_q, q)
+
+        elif kind == 'static':
+            self._world_set_bit('block:static')
+            self._world_bump_type('block:static')
+            axis = np.array([1.0, 0.0, 0.0])
+            ang = 0.05
+            rotation_q = quaternion.axis_angle_quat(axis, ang)
+            q = quaternion.quat_mul(rotation_q, q)
+        else:  # stored or unknown
+            self._world_set_bit('block:stored')
+            self._world_bump_type('block:stored')
+        return q
+
     # --- Online Learning and Execution ---
     def run_and_learn_asset(self, asset_name: str, time_budget_secs: Optional[float] = None) -> Dict:
         """
@@ -780,7 +780,7 @@ class CE1Core:
         # Consume unified event stream
         last_glyphs: Optional[str] = None
         last_counts = None
-        surp = Aspirate()
+        surp = Opix()
         minted_in_asset = 0
         events_in_asset = 0
         for ev_type, payload in block_processor.events():
@@ -790,51 +790,8 @@ class CE1Core:
                 break
             events_in_asset += 1
             if ev_type == 'block' and isinstance(payload, dict):
-                kind = payload.get('type')
-                # Minimal quaternion operators
-
-                def axis_from_id(x: int) -> np.ndarray:
-                    rng = (mix64(x) & 0xFFFFFFFF) / 0xFFFFFFFF
-                    theta = 2 * np.pi * rng
-                    z = 2 * ((mix64(x+1) & 0xFFFFFFFF) / 0xFFFFFFFF) - 1
-                    r = np.sqrt(max(0.0, 1 - z*z))
-                    return np.array([r*np.cos(theta), r*np.sin(theta), z])
-
-                def q_from_axis_angle(axis: np.ndarray, ang: float) -> np.ndarray:
-                    a = axis / (np.linalg.norm(axis) + 1e-9)
-                    s = np.sin(ang/2.0)
-                    return np.array([np.cos(ang/2.0), a[0]*s, a[1]*s, a[2]*s])
-
-                def qmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-                    w1, x1, y1, z1 = a
-                    w2, x2, y2, z2 = b
-                    return np.array([
-                        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-                        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-                        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-                        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-                    ])
-                if kind == 'dynamic':
-                    self._world_set_bit('block:dynamic')
-                    self._world_bump_type('block:dynamic')
-                    ll = payload.get('lit_len_code_lengths', {})
-                    shape_id = stable_str_hash(
-                        ''.join(f"{k}:{v}," for k, v in sorted(ll.items()))) if ll else 0
-                    axis = axis_from_id(int(shape_id & 0xFFFFFFFF))
-                    ang = 0.2
-                    q = qmul(q_from_axis_angle(axis, ang), q)
-                elif kind == 'static':
-                    self._world_set_bit('block:static')
-                    self._world_bump_type('block:static')
-                    axis = np.array([1.0, 0.0, 0.0])
-                    ang = 0.05
-                    q = qmul(q_from_axis_angle(axis, ang), q)
-                else:
-                    # stored or unknown: identity
-                    self._world_set_bit('block:stored')
-                    self._world_bump_type('block:stored')
-                    pass
-            if ev_type == 'atom' and isinstance(payload, dict):
+                q = self.resonate_with_block(q, payload)
+            elif ev_type == 'atom' and isinstance(payload, dict):
                 self._world_set_bit('ev:atom')
                 self._world_bump_type('ev:atom')
                 atom_label = str(payload.get(
@@ -877,7 +834,7 @@ class CE1Core:
                         pass
                     # Combine error glyphs with surprise bands
                     try:
-                        err = Aspirate(glyph_counts)
+                        err = Opix(glyph_counts)
                         combined = err.overlay_with(surp)
                         last_glyphs = str(combined)
                     except Exception:
@@ -922,8 +879,8 @@ class CE1Core:
         # Create a new semantic allele by combining the parents
         allele_a = self.grammar.semantic_alleles.get(token_a, np.array([1.0,0.0,0.0,0.0]))
         allele_b = self.grammar.semantic_alleles.get(token_b, np.array([1.0,0.0,0.0,0.0]))
-        new_allele = self._quat_mul(allele_a, allele_b)
-        new_allele = self._quat_norm(new_allele)
+        new_allele = quaternion.quat_mul(allele_a, allele_b)
+        new_allele = quaternion.quat_norm(new_allele)
         
         logger.debug(f"Fused Alleles | a: {np.round(allele_a, 2)}, b: {np.round(allele_b, 2)} -> New: {np.round(new_allele, 2)}")
 
