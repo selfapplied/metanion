@@ -1,10 +1,10 @@
-def main():
-    from sprixel import responsive, reflect_wave, dialog, sea, dusk, solar, squeeze, fuse
-    from ops import symmetry, stage, mark, promote
-    from sprixel2 import echo, mirror_of, dusk as dusk2, dict_ls, render
-    import sys
-    import shutil
+import sys
+import shutil
+from sprixel import responsive, reflect_wave, dialog, sea, dusk, solar, squeeze, fuse
+from sprixel2 import echo, mirror_of, dusk as dusk2, dict_ls, render, symmetry, stage, mark
 
+
+def main():
     try:
         w = shutil.get_terminal_size().columns
     except Exception:
@@ -48,8 +48,6 @@ def main():
         'width': w,
     }
     print(dict_ls(meta, w))
-
-    # compact palette bars removed for subtlety
 
 
 if __name__ == "__main__":
