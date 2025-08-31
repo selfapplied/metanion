@@ -1,19 +1,13 @@
 from dataclasses import dataclass, field, asdict
-import os
-import dataclasses
-from typing import Dict, List, Set, Any, Optional
-from collections import Counter, defaultdict
-import numpy as np
-import pickle
+from typing import Dict, List, Any, Optional
+from collections import Counter, defaultdict, namedtuple
 import msgpack
 import zipfile
-import io
 from collections.abc import Buffer
-from deflate import extract_zip_deflate_streams
-from aspire import Opix, stable_str_hash, stable_bytes_hash
+from zip import extract_zip_deflate_streams, ZipFlexManifest, FileOp, blit_to_reflex_bytes
+from aspire import Opix, stable_str_hash, apply_ops, build_ops_from_specs
 import re
-
-import quaternion
+import numpy as np
 
 
 def grammar_healer_hook(pairs):
@@ -30,6 +24,28 @@ def grammar_healer_hook(pairs):
             case _:
                 healed_pairs.append((key, value))
 
+    # Prefer explicit kind-tags if present
+    try:
+        kinds = [v for k, v in healed_pairs if k == '__kind__']
+        if kinds:
+            kind = kinds[0]
+            if kind == 'bigrams':
+                rows = []
+                for k, v in healed_pairs:
+                    if k == 'rows' and isinstance(v, list):
+                        rows = v
+                        break
+                out = defaultdict(Counter)
+                for entry in rows:
+                    try:
+                        k, row = entry
+                        out[k] = Counter(row)
+                    except Exception:
+                        continue
+                return out
+    except Exception:
+        pass
+
     # Heuristic for bigram_counts outer dict: keys are tuples
     if healed_pairs and all(isinstance(k, tuple) for k, v in healed_pairs):
         return defaultdict(Counter, {k: Counter(v) for k, v in healed_pairs})
@@ -41,29 +57,13 @@ def grammar_healer_hook(pairs):
     return dict(healed_pairs)
 
 
-# --- Configuration Dataclasses ---
-
-@dataclass
-class SeedConfig:
-    alpha: float = 0.1
-    epsilon0: float = 1.0
-    beta: float = 1.0
-    kappa: float = 0.25
-    delta_spawn: float = 0.05
-
-@dataclass
-class FractalConfig:
-    self_similarity: float = 0.6
-    scales: Dict[str, float] = field(default_factory=dict)
-
-@dataclass
-class EngineConfig:
-    levels: int = 4
-    symbols: List[str] = field(default_factory=lambda: ["carry", "borrow", "drift"])
-    priors: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    seed: SeedConfig = field(default_factory=SeedConfig)
-    fractal: FractalConfig = field(default_factory=FractalConfig)
-    stochastic_seed: int = 1337
+# --- Configuration Converted to NamedTuples ---
+SeedConfig = namedtuple('SeedConfig', 'alpha epsilon0 beta kappa delta_spawn', defaults=(
+    0.1, 1.0, 1.0, 0.25, 0.05))
+FractalConfig = namedtuple(
+    'FractalConfig', 'self_similarity scales', defaults=(0.6, {}))
+EngineConfig = namedtuple('EngineConfig', 'levels symbols priors seed fractal stochastic_seed', defaults=(
+    4, ["carry", "borrow", "drift"], {}, SeedConfig(), FractalConfig(), 1337))
 
 # --- Learned Grammar ---
 
@@ -92,67 +92,102 @@ class Genome:
     reg_sym: str = 'registry/sym.mpk'
     reg_wor: str = 'registry/worlds.mpk'
 
+    def to_manifest(self) -> ZipFlexManifest:
+        """Creates a ZipFlexManifest representing the entire genome."""
+        ops = []
+        # Add all extra assets to the manifest
+        msgpack_bytes = msgpack.packb(self.extra_assets, use_bin_type=True) or b''
+        # for name, data in self.extra_assets.items():
+        #     payload = data if isinstance(
+        #         data, bytes) else str(data).encode('utf-8')
+        #     ops.append(FileOp(name, payload))
+
+        # # Serialize and add the config
+        # ops.append(FileOp(self.reg_cfg, msgpack.packb(
+        #     self.config, use_bin_type=True) or b''))
+
+        # # Serialize and add the grammar
+        # ug = dict(self.grammar.unigram_counts)
+        # rows = [[k, dict(v)] for k, v in self.grammar.bigram_counts.items()]
+        # bg = {'__kind__': 'bigrams', 'rows': rows}
+        # gram_obj = {
+        #     'unigram_counts': ug,
+        #     'bigram_counts': bg,
+        #     'byte_classes': self.grammar.byte_classes,
+        # }
+        ops.append(FileOp(self.reg_gram, msgpack_bytes))
+        return ZipFlexManifest(ops, comment=b'Eonyx Genome')
+
     def save(self, path: str):
-        """Saves the genome to a zip archive."""
-        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Write all assets first
-            for name, data in self.extra_assets.items():
-                if isinstance(data, Buffer):
-                    zf.writestr(name, data)
+        """Saves the genome to a Reflex archive using the manifest."""
+        from pathlib import Path
 
-            # Now, explicitly write the canonical config and grammar
-            config_dict = asdict(self.config)
-            zf.writestr(self.reg_cfg, msgpack.packb(
-                config_dict, use_bin_type=True) or b'')
-
-            grammar_dict = dataclasses.asdict(self.grammar)
-            zf.writestr(self.reg_gram, msgpack.packb(
-                grammar_dict, use_bin_type=True) or b'')
+        manifest = self.to_manifest()
+        data = blit_to_reflex_bytes(manifest)
+        Path(path).write_bytes(data)
 
     @classmethod
     def from_path(cls, path: str) -> 'Genome':
-        """Loads a genome from a zip archive."""
-        all_assets, compressed_assets = extract_zip_deflate_streams(path)
+        """Loads a genome from a zip archive, signaling errors via alerts."""
         alerts = Opix()
-        config = EngineConfig()
-        grammar = Grammar()
+        all_assets, compressed_assets = extract_zip_deflate_streams(
+            path, alerts)
 
-        # Config: Try to load from canonical path, otherwise use default.
-        try:
-            config_bytes = all_assets.pop(cls.reg_cfg)
-            config_dict = msgpack.unpackb(config_bytes, raw=False)
-            seed_config = SeedConfig(**config_dict.get('seed', {}))
-            fractal_config = FractalConfig(**config_dict.get('fractal', {}))
-            config = EngineConfig(
-                levels=config_dict.get('levels', 4),
-                symbols=config_dict.get(
-                    'symbols', ["carry", "borrow", "drift"]),
-                priors=config_dict.get('priors', {}),
-                seed=seed_config,
-                fractal=fractal_config,
-                stochastic_seed=config_dict.get('stochastic_seed', 1337)
-            )
-        except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
-            alerts['C!'] += 1  # Signal missing or corrupt config
+        # --- Config Loading ---
+        config_bytes = all_assets.pop(cls.reg_cfg, None)
+        if config_bytes:
+            config_dict = None
+            try:
+                config_dict = msgpack.unpackb(config_bytes, raw=False)
+            except (msgpack.ExtraData, msgpack.FormatError, msgpack.UnpackValueError):
+                alerts['C!'] += 1  # Config corrupt
 
-        # Grammar: Try to load from canonical path, otherwise use default.
-        try:
-            grammar_bytes = all_assets.pop(cls.reg_gram)
-            grammar_dict = msgpack.unpackb(
-                grammar_bytes, raw=False, object_pairs_hook=grammar_healer_hook)
-            if not isinstance(grammar_dict, dict):
-                raise ValueError('Grammar file is not a valid dictionary.')
+            if isinstance(config_dict, dict):
+                seed_conf = SeedConfig(**config_dict.get('seed', {}))
+                fractal_conf = FractalConfig(**config_dict.get('fractal', {}))
+                config = EngineConfig(
+                    levels=config_dict.get('levels', 4),
+                    symbols=config_dict.get(
+                        'symbols', ["carry", "borrow", "drift"]),
+                    priors=config_dict.get('priors', {}),
+                    seed=seed_conf,
+                    fractal=fractal_conf,
+                    stochastic_seed=config_dict.get('stochastic_seed', 1337)
+                )
+            else:
+                config = EngineConfig()
+                if config_dict is not None:
+                    alerts['C?'] += 1  # Config is wrong type
+        else:
+            alerts['C∅'] += 1  # Config not found
+            config = EngineConfig()
 
-            ug = grammar_dict.get('unigram_counts', Counter())
-            bg = grammar_dict.get('bigram_counts', defaultdict(Counter))
-            bc = grammar_dict.get('byte_classes', {})
-            grammar = Grammar(
-                unigram_counts=ug,
-                bigram_counts=bg,
-                byte_classes={int(k): v for k, v in bc.items()}
-            )
-        except (KeyError, ValueError, msgpack.ExtraData, msgpack.FormatError):
-            alerts['Γ'] += 1  # Signal missing or corrupt grammar
+        # --- Grammar Loading ---
+        grammar_bytes = all_assets.pop(cls.reg_gram, None)
+        if grammar_bytes:
+            grammar_dict = None
+            try:
+                grammar_dict = msgpack.unpackb(
+                    grammar_bytes, raw=False, object_pairs_hook=grammar_healer_hook)
+            except (msgpack.ExtraData, msgpack.FormatError, msgpack.UnpackValueError):
+                alerts['Γ!'] += 1  # Grammar corrupt
+
+            if isinstance(grammar_dict, dict):
+                grammar = Grammar(
+                    unigram_counts=grammar_dict.get(
+                        'unigram_counts', Counter()),
+                    bigram_counts=grammar_dict.get(
+                        'bigram_counts', defaultdict(Counter)),
+                    byte_classes={int(k): v for k, v in grammar_dict.get(
+                        'byte_classes', {}).items()}
+                )
+            else:
+                grammar = Grammar()
+                if grammar_dict is not None:
+                    alerts['Γ?'] += 1  # Grammar is wrong type
+        else:
+            alerts['Γ∅'] += 1  # Grammar not found
+            grammar = Grammar()
 
         # Clean up any remaining legacy paths to create a clean asset list
         legacy_paths = ['config.msgpack', 'grammar.msgpack',
@@ -160,52 +195,30 @@ class Genome:
         for p in legacy_paths:
             all_assets.pop(p, None)
 
-        extra_assets = all_assets
+        return cls(config=config, grammar=grammar, extra_assets=all_assets, compressed_assets=compressed_assets, alerts=alerts)
 
-        return cls(config=config, grammar=grammar, extra_assets=extra_assets, compressed_assets=compressed_assets, alerts=alerts)
-
-    # --- Aspirate carry (module-owned shape) ---
+    # --- Aspirate carry (compact status) ---
     def carry(self) -> Opix:
-        """Genome-owned compact carry: assets and alerts folded into an Opix."""
         c = Opix()
-
-        # Count non-meta assets
-        asset_names = [
-            n for n in self.extra_assets.keys()
-            if not n.startswith('registry/')
-        ]
-        c['§'] += len(asset_names)
-
-        # Grammar footprint and signature
+        c['§'] += sum(1 for n in self.extra_assets if not n.startswith('registry/'))
         ug = self.grammar.unigram_counts
         bg = self.grammar.bigram_counts
         alleles = self.grammar.semantic_alleles
-
         c['μ'] += sum(ug.values())
         c['ν'] += len(ug)
         c['β'] += sum(len(row) for row in bg.values())
         c['ψ'] += len(alleles)
-
-        # Lightweight signature over top-32 unigrams
         top = sorted(ug.items(), key=lambda kv: kv[1], reverse=True)[:32]
-        sig_src = ''.join(f"{k}:{v}," for k, v in top)
-        sig = stable_str_hash(sig_src) if top else 0
-        sig_hex = f"{sig & 0xFFFFFFFF:08x}"
-        c[f"◇{sig_hex}"] += 1
+        sig = stable_str_hash(
+            ''.join(f"{k}:{v}," for k, v in top)) if top else 0
+        c[f"◇{sig & 0xFFFFFFFF:08x}"] += 1
+        return c.overlay_with(self.alerts)
 
-        # Overlay existing alerts
-        c = c.overlay_with(self.alerts)
-
-        return c
-
-    # --- Shallow grammar builder (fallback when grammar is absent/empty) ---
     def build_shallow_grammar(self, max_bytes_per_asset: int = 32768) -> None:
-        """Builds a minimal grammar from asset contents and names (shallow)."""
         word_re = re.compile(r"[A-Za-z0-9_]+")
         unig = self.grammar.unigram_counts
         bigr = self.grammar.bigram_counts
-        # From file contents
-        for name, data in self.extra_assets.items():
+        for _, data in self.extra_assets.items():
             if not data:
                 continue
             try:
@@ -213,21 +226,17 @@ class Genome:
                     'utf-8', errors='ignore')
             except Exception:
                 continue
-            tokens = word_re.findall(text)
             prev = None
-            for tok in tokens:
+            for tok in word_re.findall(text):
                 unig[tok] += 1
                 if prev is not None:
                     bigr[prev][tok] += 1
                 prev = tok
-        # From file names (path parts and stems)
         for name in self.extra_assets.keys():
-            parts = re.split(r"[/\\]+", name)
-            for p in parts:
+            for p in re.split(r"[/\\]+", name):
                 stem = re.sub(r"\.[^.]+$", "", p)
                 if stem:
                     unig[stem] += 1
-        # Ensure defaults if still empty
         if not unig:
             unig.update({"carry": 1, "borrow": 1, "drift": 1})
 
@@ -260,6 +269,30 @@ class Genome:
     def registry_delete(self, name: str) -> bool:
         key = name if name.startswith('registry/') else f'registry/{name}'
         return self.extra_assets.pop(key, None) is not None
+
+    def apply_viral_ops(self) -> None:
+        """Load and apply minimal Opix ops from registry/opx.mpk to grammar counts."""
+        try:
+            blob = self.registry_get(self.reg_opx)
+            if not isinstance(blob, (bytes, bytearray)):
+                return
+            obj = msgpack.unpackb(bytes(blob), raw=False)
+            if not isinstance(obj, dict):
+                return
+            uni_specs = obj.get('unigram_ops', [])
+            bi_specs = obj.get('bigram_ops', [])
+            if uni_specs:
+                ops = build_ops_from_specs(uni_specs)
+                self.grammar.unigram_counts = apply_ops(
+                    self.grammar.unigram_counts, ops)
+            if bi_specs:
+                opsb = build_ops_from_specs(bi_specs)
+                bg_new = defaultdict(Counter)
+                for k, row in self.grammar.bigram_counts.items():
+                    bg_new[k] = apply_ops(row, opsb)
+                self.grammar.bigram_counts = bg_new
+        except Exception:
+            pass
 
     @staticmethod
     def _create_byte_sphere() -> np.ndarray:
@@ -299,33 +332,14 @@ class Genome:
 
     @staticmethod
     def _apply_quat_rotation(points: np.ndarray, q: np.ndarray) -> np.ndarray:
-        """Rotates a set of 3D points by a quaternion."""
-        q_conj = np.array([q[0], -q[1], -q[2], -q[3]])
-        
-        # Represent points as pure quaternions
-        points_quat = np.zeros((points.shape[0], 4))
-        points_quat[:, 1:] = points
-        
-        # Apply rotation: p' = q * p * q_conj
-        rotated_points = np.zeros_like(points_quat)
-        for i, p in enumerate(points_quat):
-            # manual quaternion multiplication: q * p
-            qp = np.array([
-                q[0]*p[0] - q[1]*p[1] - q[2]*p[2] - q[3]*p[3],
-                q[0]*p[1] + q[1]*p[0] + q[2]*p[3] - q[3]*p[2],
-                q[0]*p[2] - q[1]*p[3] + q[2]*p[0] + q[3]*p[1],
-                q[0]*p[3] + q[1]*p[2] - q[2]*p[1] + q[3]*p[0]
-            ])
-            # (q * p) * q_conj
-            qp_qconj = np.array([
-                qp[0]*q_conj[0] - qp[1]*q_conj[1] - qp[2]*q_conj[2] - qp[3]*q_conj[3],
-                qp[0]*q_conj[1] + qp[1]*q_conj[0] + qp[2]*q_conj[3] - qp[3]*q_conj[2],
-                qp[0]*q_conj[2] - qp[1]*q_conj[3] + qp[2]*q_conj[0] + qp[3]*q_conj[1],
-                qp[0]*q_conj[3] + qp[1]*q_conj[2] - qp[2]*q_conj[1] + qp[3]*q_conj[0]
-            ])
-            rotated_points[i] = qp_qconj
-            
-        return rotated_points[:, 1:]
+        """Vectorized rotation via 3x3 matrix derived from quaternion q=[w,x,y,z]."""
+        w, x, y, z = q
+        R = np.array([
+            [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
+            [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+            [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)],
+        ])
+        return points @ R.T
 
     @staticmethod
     def allele_to_byte_classes(q: np.ndarray, n_classes: int = 8) -> Dict[int, int]:
@@ -350,7 +364,7 @@ class Genome:
     def blend(g1: 'Genome', g2: 'Genome', factor: float) -> 'Genome':
         """Creates a new Genome by blending two parent genomes."""
         factor = np.clip(factor, 0.0, 1.0)
-        
+
         # --- Blend EngineConfig ---
         c1, c2 = g1.config, g2.config
         
@@ -393,22 +407,54 @@ class Genome:
             stochastic_seed=int((1-factor)*c1.stochastic_seed + factor*c2.stochastic_seed)
         )
 
-        # --- Blend Grammar ---
-        gram1, gram2 = g1.grammar, g2.grammar
-        
-        # Blend unigrams
-        new_unigrams = Counter()
-        for k in set(gram1.unigram_counts) | set(gram2.unigram_counts):
-            c1 = gram1.unigram_counts.get(k, 0); c2 = gram2.unigram_counts.get(k, 0)
-            new_unigrams[k] = int((1-factor)*c1 + factor*c2)
+        # --- Blend Grammar (renormalized largest-remainder) ---
+        def _renorm_merge(a: Counter, b: Counter, t: float) -> Counter:
+            if not a and not b:
+                return Counter()
+            w = 1.0 - t
+            keys = set(a.keys()) | set(b.keys())
+            # target total mass
+            target = int(round(w * sum(a.values()) + t * sum(b.values())))
+            vals = {k: (w * float(a.get(k, 0)) + t * float(b.get(k, 0)))
+                    for k in keys}
+            s = float(sum(vals.values()))
+            if s <= 0.0 or target <= 0:
+                return Counter()
+            scale = target / s
+            floors: Dict[str, int] = {}
+            fracs = []
+            acc = 0
+            for k, v in vals.items():
+                x = v * scale
+                f = int(np.floor(x + 1e-12))
+                floors[k] = f
+                acc += f
+                fracs.append((x - f, k))
+            out = Counter(floors)
+            rem = max(0, target - acc)
+            fracs.sort(reverse=True)
+            for i in range(rem):
+                if i < len(fracs):
+                    out[fracs[i][1]] += 1
+            # prune zeros
+            for k in list(out.keys()):
+                if out[k] <= 0:
+                    del out[k]
+            return out
 
-        # Blend bigrams
+        gram1, gram2 = g1.grammar, g2.grammar
+        new_unigrams = _renorm_merge(
+            gram1.unigram_counts, gram2.unigram_counts, float(factor))
+
         new_bigrams = defaultdict(Counter)
-        for t1 in set(gram1.bigram_counts) | set(gram2.bigram_counts):
-            for t2 in set(gram1.bigram_counts.get(t1, {})) | set(gram2.bigram_counts.get(t1, {})):
-                c1 = gram1.bigram_counts.get(t1, {}).get(t2, 0)
-                c2 = gram2.bigram_counts.get(t1, {}).get(t2, 0)
-                new_bigrams[t1][t2] = int((1-factor)*c1 + factor*c2)
+        all_src = set(gram1.bigram_counts.keys()) | set(
+            gram2.bigram_counts.keys())
+        for t1 in all_src:
+            row1 = gram1.bigram_counts.get(t1, Counter())
+            row2 = gram2.bigram_counts.get(t1, Counter())
+            merged = _renorm_merge(row1, row2, float(factor))
+            if merged:
+                new_bigrams[t1] = merged
         
         # For byte classes, inherit from one parent (simplest approach)
         new_byte_classes = gram1.byte_classes if factor < 0.5 else gram2.byte_classes

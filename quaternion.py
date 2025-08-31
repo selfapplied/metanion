@@ -19,7 +19,9 @@ This module provides the classical mechanics for this quantum world. It is the
 toolbox of pure geometry.
 """
 import numpy as np
+from emits import em
 
+@em("{} [1,0,0] 3.141592653589793 := m: 1.0")
 def axis_angle_quat(axis: np.ndarray, angle: float) -> np.ndarray:
     """Creates a quaternion from an axis and an angle."""
     w = np.cos(angle / 2.0)
@@ -29,6 +31,7 @@ def axis_angle_quat(axis: np.ndarray, angle: float) -> np.ndarray:
         axis = axis / axis_norm * s
     return np.array([w, axis[0], axis[1], axis[2]])
 
+@em("{axis_angle_quat [0,0,1] 1.0471975512->q} {} q {quat_conj q->qc} qc := m: 1.0")
 def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """Multiplies two quaternions."""
     w1, x1, y1, z1 = q1
@@ -39,15 +42,19 @@ def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
     return np.array([w, x, y, z])
 
+@em("{} [2,3,4,5] := m: 1.0")
 def quat_norm(q: np.ndarray) -> np.ndarray:
     """Normalizes a quaternion."""
     norm = np.linalg.norm(q)
     return q / norm if norm > 1e-15 else q
 
+@em("{axis_angle_quat [0,0,1] 0.5->q} {} q := m: 1.0")
 def quat_conj(q: np.ndarray) -> np.ndarray:
     """Returns the conjugate of a quaternion."""
     return np.array([q[0], -q[1], -q[2], -q[3]])
 
+@em("{} [1,0,0,0] [0,1,0,0] 0 := m: 0.0")
+@em("{} [1,0,0,0] [0,1,0,0] 1 := m: 0.0")
 def quat_slerp(q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:
     """Performs spherical linear interpolation between two quaternions."""
     dot = np.dot(q1, q2)
@@ -75,6 +82,7 @@ def quat_slerp(q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:
         # If quaternions are parallel, linear interpolation is fine
         return (1.0 - t) * q1 + t * q2
 
+@em("{} [[0,0,0],[0,0,0],[0,0,0]] := m: 0.0")
 def shape_curvature(vectors: np.ndarray) -> np.ndarray:
     """
     Measures the geometric curvature in an ordered sequence of vectors.

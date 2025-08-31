@@ -1,0 +1,29 @@
+
+# Python
+*.pyc
+
+# Vim
+*.swp
+
+# macOS
+.DS_Store
+
+# Sourcemaps
+*.js.map
+
+# IDE
+.idea/
+.vscode/
+
+# Node
+node_modules/
+
+# Build artifacts
+/output
+/test-output
+.out
+.in
+
+uv.lock
+
+*.zip

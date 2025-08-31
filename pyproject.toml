@@ -9,6 +9,7 @@ dependencies = [
     "isal>=1.7.2",
     "msgpack>=1.1.1",
     "numpy>=2.3.2",
+    "scikit-learn>=1.7.1",
     "tqdm>=4.67.1",
 ]
 

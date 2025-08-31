@@ -10,18 +10,28 @@ This module turns finite motifs into infinite, adaptive signals. It offers:
 Names favor clarity and flow; functions compose like light operators.
 """
 
-from itertools import cycle, chain, islice
-from typing import Iterable, Iterator, Callable, Optional, TypeVar, List, Any
+import doctest
+from itertools import chain, islice
+from typing import Iterable, Callable, Optional, TypeVar, List, Any, Union, Tuple, Protocol, Generic, SupportsFloat, SupportsInt, Literal, overload
 import math
+from math import pi, e
 import random
 import hashlib
+import numbers
 
+# Import Wave from the new octwave module
+from octwave import Wave, wave
 
 T = TypeVar("T")
 U = TypeVar("U")
 
+
+def _is_numeric(x: Any) -> bool:
+    """Checks if a value is a number, excluding bools."""
+    return isinstance(x, numbers.Number) and not isinstance(x, bool)
+
+
 __all__ = [
-    "mirror",
     "signal",
     "parametric",
     "layout",
@@ -67,32 +77,25 @@ __all__ = [
 ]
 
 
-def mirror(seq: Iterable[T]) -> Iterator[Any]:
+class Parametric[U]:
+    """Protocol for functions that transform position ratios into parameter space."""
+
+    def __call__(self, ratio: float) -> U: ...
+
+
+def signal(seq: Iterable[T], morph: Optional[Callable[[T, int, int], Any]] = None) -> Callable[[int], List[Any]]:
     """
-    Reflect a finite motif into an infinite symmetric stream.
+    Carrier wave that transports measurements through time.
+    Takes a wave flow and creates a time-based transport system.
+
+    The returned callable transports n measurements through time.
+    If morph is provided, measurements are transformed during transport.
 
     Example:
-        mirror(["a", "b", "c"]) => a, b, c, b, a, b, c, b, a, ...
-
-    Empty input yields an infinite stream of empty strings.
-    """
-    items = list(seq)
-    if not items:
-        return cycle([""])
-    wave = chain(items, reversed(items[1:-1]))
-    return cycle(wave)
-
-
-def signal(seq: Iterable[T], morph: Optional[Callable[[T, int, int], U]] = None) -> Callable[[int], List[Any]]:
-    """
-    Build an adaptive signal from a finite motif.
-
-    The returned callable emits a list of length n for any requested n.
-    If morph is provided, it is called as morph(item, i, n) for each position.
-
-    Example:
-        head = signal(["╔", "╦", "╗"]) ; head(5)
-        body = signal(["╠", "╬", "╣"]) ; body(7)
+        head = signal(["╔", "╦", "╗"])  # Create time transport
+        head(5)  # Transport 5 measurements through time
+        body = signal(["╠", "╬", "╣"])  # Another time transport
+        body(7)  # Transport 7 measurements through time
 
         def scale(glyph: str, i: int, n: int) -> str:
             s = 1.0 + (i / max(1, n)) * 0.5
@@ -101,7 +104,7 @@ def signal(seq: Iterable[T], morph: Optional[Callable[[T, int, int], U]] = None)
         scaled = signal(["╔", "╦", "╗"], scale)
         scaled(5)
     """
-    loop = mirror(seq)
+    loop = wave(seq)
 
     def at(n: int, *args: Any, **kw: Any) -> List[Any]:
         view = list(islice(loop, n))
@@ -112,14 +115,14 @@ def signal(seq: Iterable[T], morph: Optional[Callable[[T, int, int], U]] = None)
     return at
 
 
-def parametric(base: Iterable[T], phi: Optional[Callable[[float], U]] = None,
-               emit: Optional[Callable[[T, float, int, Optional[U]], Any]] = None) -> Callable[[int], List[Any]]:
+def parametric(base: Iterable[T], phi: Parametric[U],
+               emit: Optional[Callable[[T, float, int, U], Any]] = None) -> Callable[[int], List[Union[T, Tuple[T, U]]]]:
     """
     Evolve parameters across a mirrored signal using a function of position.
 
-    phi receives a ratio r in [0,1] and returns a parameter value.
+    phi receives a ratio r in [0,1] and returns a parameter value in U-space.
     emit can post-process each item as emit(item, r, n, p). If emit is not
-    provided, (item, p) pairs are produced when phi exists, otherwise item.
+    provided, (item, p) pairs are always produced.
 
     Example:
         wave = parametric(["A", "B", "C"], lambda r: math.sin(2*math.pi*r))
@@ -131,7 +134,7 @@ def parametric(base: Iterable[T], phi: Optional[Callable[[float], U]] = None,
         bright = parametric(["X", "Y", "Z"], lambda r: math.exp(2*r)-1, emit=paint)
         bright(6)
     """
-    loop = mirror(base)
+    loop = wave(base)
 
     def at(n: int) -> List[Any]:
         out: List[Any] = []
@@ -141,11 +144,11 @@ def parametric(base: Iterable[T], phi: Optional[Callable[[float], U]] = None,
                 r = 0.0
             else:
                 r = i / (n - 1)
-            p = phi(r) if phi else None
+            p = phi(r)
             if emit:
                 out.append(emit(x, r, n, p))
             else:
-                out.append((x, p) if phi else x)
+                out.append((x, p))
         return out
 
     return at
@@ -153,13 +156,14 @@ def parametric(base: Iterable[T], phi: Optional[Callable[[float], U]] = None,
 
 def layout(elems: Iterable[str], width: int, spacing: Optional[Callable[[int, int], int]] = None, unit: int = 10) -> str:
     """
-    Compose a simple responsive row from elements for a given width.
+    Arranges measurements in a space.
+    Takes transported measurements and arranges them spatially.
 
-    - width: container width in character cells
-    - unit: approximate element width used to estimate how many to place
+    - width: spatial width to arrange measurements within
+    - unit: approximate measurement size for spacing calculations
+    - spacing: function that determines gaps between measurements
 
-    If spacing is provided, it will be called as spacing(width, count) and the
-    resulting number of spaces is used between elements. Defaults to concatenation.
+    Creates spatial composition from time-transported measurements.
     """
     need = max(1, width // max(1, unit))
     row = signal(elems)(need)
@@ -259,6 +263,7 @@ def ramp(stops: list[tuple[float, tuple[int, int, int]]]) -> Callable[[float], t
 
 
 # Preset palettes
+
 dusk = ramp([
     (0.00, fromhex('#1b1f3b')),
     (0.35, fromhex('#53354a')),
@@ -339,6 +344,138 @@ solar = ramp([
 ])
 solar.__name__ = 'solar'
 setattr(solar, 'label', 'solar')
+
+
+# Thermal gravity color system (alternative palette generation)
+def thermal_palette(base_color: tuple[int, int, int], temp_vector: list[float], 
+                    stops: Optional[list[float]] = None) -> Callable[[float], tuple[int, int, int]]:
+    """
+    Generate palette from thermal gravity vector.
+    base_color: anchor color (usually coldest)
+    temp_vector: temperature shifts [+0.4, +0.3, +0.8] for 3 transitions
+    stops: optional position stops, defaults to even distribution
+    
+    Example thermal vectors:
+    - [+0.4, +0.3, +0.8]: "hot escape from cold origins" (like dusk)
+    - [+0.0, -0.1, +0.0]: "cool drift" (like pastel)
+    - [+0.6, +0.8, +0.9, +1.0]: "rising inferno" (like fire)
+    
+    >>> # Test dusk palette analysis
+    >>> dusk_pal = thermal_palette(fromhex('#1b1f3b'), [+0.4, +0.3, +0.8])
+    >>> analysis = dusk_pal.thermal_analysis
+    >>> analysis.semantic_description
+    'Thermal Escape'
+    >>> analysis.gravity_direction
+    'neutral'
+    """
+    if stops is None:
+        stops = [i / max(1, len(temp_vector)) for i in range(len(temp_vector) + 1)]
+    
+    # Thermal color mapping using existing palette colors for consistency
+    def temp_to_color(temp: float) -> tuple[int, int, int]:
+        if temp <= -0.5:  # Cold: deep blues
+            t = (temp + 1.0) / 0.5  # [-1, -0.5] -> [0, 1]
+            return blend(fromhex('#0b132b'), fromhex('#1c2541'), t)
+        elif temp <= 0.0:  # Cool-neutral: blues to purples
+            t = (temp + 0.5) / 0.5  # [-0.5, 0] -> [0, 1]
+            return blend(fromhex('#1c2541'), fromhex('#53354a'), t)
+        elif temp <= 0.5:  # Warm-neutral: purples to burgundies
+            t = temp / 0.5  # [0, 0.5] -> [0, 1]
+            return blend(fromhex('#53354a'), fromhex('#903749'), t)
+        else:  # Hot: burgundies to reds
+            t = (temp - 0.5) / 0.5  # [0.5, 1] -> [0, 1]
+            return blend(fromhex('#903749'), fromhex('#e84545'), t)
+    
+    # Build color stops from thermal vector
+    color_stops = [(stops[0], base_color)]
+    for i, temp_shift in enumerate(temp_vector):
+        color = temp_to_color(temp_shift)
+        color_stops.append((stops[i + 1], color))
+    
+    palette_func = ramp(color_stops)
+    
+    # Attach thermal analysis to the palette function
+    from collections import namedtuple
+    ThermalAnalysis = namedtuple('ThermalAnalysis', [
+        'temp_vector', 'temp_range', 'thermal_acceleration', 
+        'energy_release', 'gravity_direction', 'semantic_description', 'stops'
+    ])
+    
+    def _compute_thermal_acceleration(temps: list[float], positions: list[float]) -> float:
+        """Compute how quickly temperature changes across the palette"""
+        if len(temps) < 2:
+            return 0.0
+        n = len(temps)
+        sum_x = sum(positions[1:])
+        sum_y = sum(temps)
+        sum_xy = sum(x * y for x, y in zip(positions[1:], temps))
+        sum_x2 = sum(x * x for x in positions[1:])
+        if n * sum_x2 - sum_x * sum_x == 0:
+            return 0.0
+        return (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+    
+    def _compute_energy_release(temps: list[float]) -> float:
+        """Compute the total energy change across the thermal vector"""
+        if len(temps) < 2:
+            return 0.0
+        return sum(abs(temps[i] - temps[i-1]) for i in range(1, len(temps)))
+    
+    def _determine_gravity_direction(temps: list[float]) -> str:
+        """Determine the overall gravitational direction"""
+        if not temps:
+            return "neutral"
+        avg_temp = sum(temps) / len(temps)
+        if avg_temp > 0.3:
+            return "heatward"
+        elif avg_temp < -0.3:
+            return "coldward"
+        else:
+            return "neutral"
+    
+    def _generate_semantic_description(temps: list[float]) -> str:
+        """Generate a semantic description of the thermal pattern"""
+        if len(temps) < 2:
+            return "Single Temperature"
+        if all(t > 0.3 for t in temps) and temps[-1] > temps[0]:
+            return "Rising Inferno"
+        elif all(t > 0.2 for t in temps) and max(temps) - min(temps) < 0.4:
+            return "Sustained Warmth"
+        elif all(t < -0.2 for t in temps) and temps[-1] < temps[0]:
+            return "Cooling Spiral"
+        elif temps[-1] - temps[0] > 1.0:
+            return "Thermal Escape"
+        elif abs(temps[0]) > 0.8:
+            return "Gravitational Anchor"
+        temp_range = max(temps) - min(temps)
+        if temp_range > 1.0:
+            return "Thermal Drama"
+        elif temp_range > 0.5:
+            return "Moderate Shift"
+        else:
+            return "Subtle Variation"
+    
+    # Create and attach the analysis
+    temp_range = max(temp_vector) - min(temp_vector)
+    temp_acceleration = _compute_thermal_acceleration(temp_vector, stops)
+    energy_release = _compute_energy_release(temp_vector)
+    gravity_direction = _determine_gravity_direction(temp_vector)
+    semantic_description = _generate_semantic_description(temp_vector)
+    
+    palette_func.thermal_analysis = ThermalAnalysis(
+        temp_vector=temp_vector,
+        temp_range=temp_range,
+        thermal_acceleration=temp_acceleration,
+        energy_release=energy_release,
+        gravity_direction=gravity_direction,
+        semantic_description=semantic_description,
+        stops=stops
+    )
+    
+    return palette_func
+
+
+# Example: dusk could be recreated as:
+# dusk_thermal = thermal_palette(fromhex('#1b1f3b'), [+0.4, +0.3, +0.8], [0.0, 0.35, 0.65, 1.0])
 
 
 def splash(items: Iterable[str] | str, pal: Callable[[float], tuple[int, int, int]], tone: Optional[Callable[[float], float]] = None) -> List[str]:
@@ -426,8 +563,8 @@ def showcase(width: Optional[int] = None) -> str:
     menu_wash = "".join(rainbow(menu_text)(len(menu_text)))
 
     # Line 4: framing with mirrored corners
-    frame = signal(["╔", "═", "╗"]).__call__(w)
-    floor = signal(["╚", "═", "╝"]).__call__(w)
+    frame = signal(["╔", "═", "╗"])(w)
+    floor = signal(["╚", "═", "╝"])(w)
     top = "".join(rainbow(frame)(len(frame)))
     bot = "".join(rainbow(floor)(len(floor)))
 
@@ -1154,3 +1291,7 @@ def fuse(text: str) -> dict:
     g2 = seed(m2, pal=p2, gate=gate, fx=fx_draw())
     mix = r.random()
     return splice(g1, g2, mix)
+
+
+if __name__ == "__main__":
+    doctest.testmod()

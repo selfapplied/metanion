@@ -1,5 +1,3 @@
-import zipfile
-import struct
 import zlib
 from bitstring import ConstBitStream, ReadError
 from typing import Dict, Tuple, Optional, Union, SupportsBytes, Callable, Iterable
@@ -8,15 +6,16 @@ from typing import List
 from aspire import (
     mix64,
     stable_str_hash,
-    reverse_bits,
     build_huffman_tree,
     build_heap_decoder,
     pack_qnan_with_payload,
-    extract_qnan_payload,
-    counts_render,
-    sort_by_count,
     Opix,
 )
+
+KW_CARRY = '✓'
+KW_BORROW = 'α'
+KW_DRIFT = 'ℋ'
+KW_CYCLE = '∞'
 
 
 class BitLSB:
@@ -206,13 +205,18 @@ def parse_dynamic_huffman_block(reader: BitLSB, on_error: Callable[[str], None] 
 
     has_new_tokens = bool(lit_len_code_lengths) and any(
         int(v) > 0 for v in lit_len_code_lengths.values())
-    return lit_len_tree, dist_tree, {
+    
+    # Create block metadata for genetic enhancement
+    block_meta = {
+        'type': 'dynamic',
         'hlit': hlit, 'hdist': hdist, 'hclen': hclen,
         'cl_code_lengths': cl_code_lengths,
         'lit_len_code_lengths': lit_len_code_lengths,
         'dist_code_lengths': dist_code_lengths,
         'has_new_tokens': has_new_tokens,
     }
+    
+    return lit_len_tree, dist_tree, block_meta
 
 
 def decode_run_length_codes(reader: BitLSB, cl_code_lengths: Dict[int, int], num_codes: int, on_error: Callable[[str], None] = lambda _k: None):
@@ -272,77 +276,6 @@ def decode_run_length_codes(reader: BitLSB, cl_code_lengths: Dict[int, int], num
 # --- ZIP-aware deflate extraction ---
 
 
-def extract_zip_deflate_streams(zip_path: str) -> Tuple[Dict[str, bytes], Dict[str, Dict]]:
-    """
-    Extracts deflate streams from a ZIP file with ZIP-aware validation.
-    Returns (extra_assets, compressed_assets) where compressed_assets contains
-    metadata for deflate entries.
-    """
-    extra_assets = {}
-    compressed_assets = {}
-
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        # Open the underlying file for raw access to deflate streams
-        with open(zip_path, 'rb') as f:
-            for info in zf.infolist():
-                name = info.filename
-
-                # Always get decompressed content for processing
-                extra_assets[name] = zf.read(name)
-
-                # For deflate entries, extract raw deflate stream with ZIP validation
-                if info.compress_type == zipfile.ZIP_DEFLATED:
-                    try:
-                        raw_deflate = _extract_raw_deflate(f, info)
-                        if raw_deflate:
-                            compressed_assets[name] = {
-                                'raw_deflate': raw_deflate,
-                                'compressed_size': info.compress_size,
-                                'uncompressed_size': info.file_size,
-                                'crc32': info.CRC,
-                                'flags': info.flag_bits
-                            }
-
-                            # Validate CRC32 if we have the data
-                            if extra_assets[name]:
-                                actual_crc = zlib.crc32(
-                                    extra_assets[name]) & 0xffffffff
-                                if actual_crc != info.CRC:
-                                    print(
-                                        f"Warning: CRC mismatch for {name}: expected {info.CRC:08x}, got {actual_crc:08x}")
-                    except Exception as e:
-                        print(
-                            f"Warning: Could not extract raw deflate for {name}: {e}")
-
-    return extra_assets, compressed_assets
-
-
-def _extract_raw_deflate(f, zip_info) -> Optional[bytes]:
-    """Extracts raw deflate data from a ZIP entry."""
-    # Parse local header to find data offset
-    f.seek(zip_info.header_offset)
-    hdr = f.read(30)
-    if len(hdr) != 30:
-        return None
-
-    sig, ver, flag, comp, mt, md, crc32, comp_size, file_size, nlen, xlen = \
-        struct.unpack('<IHHHHHIIIHH', hdr)
-
-    if sig != 0x04034b50:  # Local header signature
-        return None
-
-    # Skip variable-length fields
-    f.seek(zip_info.header_offset + 30 + nlen + xlen)
-
-    # Read exactly compressed_size bytes (raw DEFLATE, no zlib header)
-    raw_deflate = f.read(zip_info.compress_size)
-
-    if len(raw_deflate) == zip_info.compress_size:
-        return raw_deflate
-
-    return None
-
-
 def create_deflate_stream(compressed_data: Union[bytes, Dict], fallback_data: bytes) -> bytes:
     """
     Creates a deflate stream from either raw bytes or ZIP metadata.
@@ -378,233 +311,152 @@ def validate_deflate_stream(stream_bytes: bytes, expected_size: Optional[int] = 
 # Legacy placeholder removed; decoding handled in BlockProcessor.decode_payload
 
 
-# --- Block Processor (Handles individual DEFLATE blocks) ---
-class BlockProcessor:
-    """Processes individual DEFLATE blocks, driving quaternion physics and fusion events."""
-
-    def __init__(self, asset_name: str, genome, ingest_text_func):
-        """
-        Initialize the block processor for a specific asset.
-        Sets up the stream and ingests text for grammar building.
-        """
-        self.asset_name = asset_name
-        self.genome = genome
-        self.block_count = 0
-        self.total_blocks_processed = 0
-
-        # Validate asset exists
-        if asset_name not in genome.extra_assets:
-            raise ValueError(f"Asset '{asset_name}' not found in genome")
-
-        # Get compressed/decompressed bytes
-        self.compressed_bytes = genome.compressed_assets.get(asset_name, None)
-        self.decompressed_bytes = genome.extra_assets.get(asset_name, b"")
-
-        # Ingest text to build grammar
-        ingest_text_func(asset_name, self.decompressed_bytes)
-
-        # Create stream for processing using consolidated deflate functions
-        stream_bytes = create_deflate_stream(
-            self.compressed_bytes, self.decompressed_bytes)
-        stream_bytes = validate_deflate_stream(stream_bytes)
-
-        self.stream = ConstBitStream(bytes=stream_bytes)
-        self.reader = BitLSB(self.stream)
-        # Convert bytes to bits for bounds checking
-        self.max_pos = len(self.stream.bytes) * 8
-        # Error counters per asset as an Aspirate (Counter-like)
+class ErrorTracker:
+    def __init__(self):
         self.error_counts: Counter = Opix(
             heap=[], length_hist=Counter(), shape_id=0, max_bits=0)
-        # Lightweight cycle detection
         self._error_window: List[str] = []
         self._seen_states: Dict[tuple, int] = {}
         self._cycle_count: int = 0
         self._step_idx: int = 0
-        # State carrier
-        self.state_phi: float = 0.0
 
-    def _format_atom_label(self, phase: int) -> str:
-        glyphs_str = str(self.error_counts)
-        return f"{self.asset_name}:{self.block_count}{phase}ºπ[{glyphs_str}]"
-
-    def _count_error(self, key: str):
+    def count_error(self, key: str):
         self.error_counts[key] += 1
 
-    def _record_error(self, key: str, attempted_parse: str):
-        # Count
-        self._count_error(key)
-        # Update rolling window (K=4)
+    def record_error(self, key: str, attempted_parse: str, stream_pos: int):
+        self.count_error(key)
         self._error_window.append(key)
         if len(self._error_window) > 4:
             self._error_window.pop(0)
-        # Build simple state signature
-        phase = int(self.stream.pos % 8)
-        byte_pos = int(self.stream.pos // 8)
-        # Deterministic recent window hash using golden-ratio mixer
+
+        phase = int(stream_pos % 8)
+        byte_pos = int(stream_pos // 8)
         recent_hash = 0
         for k in self._error_window:
             recent_hash = mix64(recent_hash + stable_str_hash(k))
+
         state = (phase, attempted_parse, byte_pos, recent_hash)
-        # Detect short cycles within window W=128 steps
         prev = self._seen_states.get(state)
+
         if prev is not None and (self._step_idx - prev) <= 128:
             self._cycle_count += 1
             if self._cycle_count >= 2:
-                # Bail stream on detected cycle
-                self._count_error('∞')
-                self.stream.pos = self.max_pos
-                self._step_idx += 1
-                return
+                self.count_error('∞')
+                return True  # Cycle detected
+
         self._seen_states[state] = self._step_idx
         self._step_idx += 1
+        return False
 
-    def process_block(self) -> Dict:
-        """Processes a single DEFLATE block and returns block information."""
-        # Check if we've reached the end of our deflate stream
-        if self.stream.pos >= self.max_pos:
-            return {'block_type': -1, 'last_block': True, 'end_of_stream': True}
 
-        # Check if we have enough bits for a block header
-        if self.max_pos - self.stream.pos < 3:
-            return {'block_type': -1, 'last_block': True, 'incomplete_header': True}
+def stream_events(asset_name: str, genome: 'Genome', ingest_text_func) -> Iterable[Tuple[str, Union[str, Tuple[int, int], Dict]]]:
+    """
+    Main entry point for processing a DEFLATE stream and yielding events.
+    """
+    compressed_bytes = genome.compressed_assets.get(asset_name, None)
+    decompressed_bytes = genome.extra_assets.get(asset_name, b"")
+    stream_bytes = create_deflate_stream(compressed_bytes, decompressed_bytes)
+    stream_bytes = validate_deflate_stream(stream_bytes)
 
-        last_block = bool(self.reader.read_bits(1))
-        block_type = self.reader.read_bits(2)
+    stream_processor = StreamProcessor(stream_bytes)
+    error_tracker = ErrorTracker()
 
-        # Parse the block based on type with bounds checking
+    # Ingest text to build grammar
+    ingest_text_func(asset_name, decompressed_bytes)
+
+    yield from _process_events(asset_name, stream_processor, error_tracker)
+
+
+def _process_events(asset_name: str, sp: 'StreamProcessor', et: 'ErrorTracker') -> Iterable[Tuple[str, Union[str, Tuple[int, int], Dict]]]:
+    """
+    Core event processing loop.
+    """
+    block_count = 0
+    state_phi = 0.0
+
+    def _format_atom_label(phase: int) -> str:
+        glyphs_str = str(et.error_counts)
+        return f"{asset_name}:{block_count}{phase}ºπ[{glyphs_str}]"
+
+    while True:
+        # Check for end of stream
+        if sp.stream.pos >= sp.max_pos:
+            break
+
+        # Check for incomplete header
+        if sp.max_pos - sp.stream.pos < 3:
+            break
+
+        last_block = bool(sp.reader.read_bits(1))
+        block_type = sp.reader.read_bits(2)
+
+        info = {}
         if block_type == 2:  # Dynamic Huffman
             try:
                 lit_len_tree, dist_tree, meta = parse_dynamic_huffman_block(
-                    self.reader, on_error=lambda k: self._record_error(k, 'dynamic_header'))
-            except Exception as e:
-                # Hard bail: end this stream to avoid cascaded desync
-                self._record_error('ℋ', 'dynamic_header')
+                    sp.reader, on_error=lambda k: et.record_error(k, 'dynamic_header', sp.stream.pos))
+                info = {'lit_len_tree': lit_len_tree,
+                        'dist_tree': dist_tree, 'meta': meta}
+            except Exception:
+                if et.record_error('ℋ', 'dynamic_header', sp.stream.pos):
+                    break
                 # Fallback: parse remaining as a stored literal block
-                data = parse_stored_fallback(self.reader)
+                data = parse_stored_fallback(sp.reader)
                 if data:
-                    self._count_error('✓')
+                    et.count_error('✓')
                 # Atomization: set state_phi to qNaN with payload and label
-                atom_id = mix64(mix64(self._step_idx) ^
+                atom_id = mix64(mix64(et._step_idx) ^
                                 mix64(len(data))) & ((1 << 51) - 1)
-                self.state_phi = pack_qnan_with_payload(atom_id)
-                self._count_error('α')
-                phase = int(self.stream.pos % 8)
-                atom_label = self._format_atom_label(phase)
+                state_phi = pack_qnan_with_payload(atom_id)
+                et.count_error('α')
+                phase = int(sp.stream.pos % 8)
+                atom_label = _format_atom_label(phase)
                 meta = {'block_type': 'stored_fallback', 'stored_data': data,
                         'atom_id': int(atom_id), 'atom_label': atom_label}
-                return {'block_type': 0, 'last_block': True, 'meta': meta}
+                info = {'meta': meta}
+
         elif block_type == 1:  # Static Huffman
             lit_len_tree, dist_tree, meta = parse_static_huffman_block(
-                self.reader)
+                sp.reader)
+            info = {'lit_len_tree': lit_len_tree,
+                    'dist_tree': dist_tree, 'meta': meta}
+
         elif block_type == 0:  # Stored
             stored_data = parse_stored_block(
-                self.reader, on_warning=lambda k: self._record_error(k, 'stored_header'))
+                sp.reader, on_warning=lambda k: et.record_error(k, 'stored_header', sp.stream.pos))
             if stored_data:
-                self._count_error('✓')
-            meta = {'block_type': 'stored', 'stored_data': stored_data}
-            return {'block_type': 0, 'last_block': last_block, 'meta': meta}
+                et.count_error('✓')
+            info = {'meta': {'stored_data': stored_data}}
+
         else:
             # Reserved BTYPE=3; hard bail end-of-stream
-            self._record_error('⊘', 'header')
+            if et.record_error('⊘', 'header', sp.stream.pos):
+                break
             # Fallback: parse remaining as a stored literal block
-            data = parse_stored_fallback(self.reader)
+            data = parse_stored_fallback(sp.reader)
             if data:
-                self._count_error('✓')
+                et.count_error('✓')
             # Atomization: set state_phi to qNaN with payload and label
-            atom_id = mix64(mix64(self._step_idx) ^
+            atom_id = mix64(mix64(et._step_idx) ^
                             mix64(len(data))) & ((1 << 51) - 1)
-            self.state_phi = pack_qnan_with_payload(atom_id)
-            self._count_error('α')
-            phase = int(self.stream.pos % 8)
-            atom_label = self._format_atom_label(phase)
+            state_phi = pack_qnan_with_payload(atom_id)
+            et.count_error('α')
+            phase = int(sp.stream.pos % 8)
+            atom_label = _format_atom_label(phase)
             meta = {'block_type': 'stored_fallback', 'stored_data': data,
                     'atom_id': int(atom_id), 'atom_label': atom_label}
-            return {'block_type': 0, 'last_block': True, 'meta': meta}
+            info = {'meta': meta}
 
-        self.block_count += 1
-        self.total_blocks_processed += 1
-
-        return {
-            'block_type': block_type,
-            'last_block': last_block,
-            'lit_len_tree': lit_len_tree,
-            'dist_tree': dist_tree,
-            'meta': meta
-        }
-
-    def decode_payload(self,
-                       lit_len_tree: List[Dict[str, Optional[int]]],
-                       dist_tree: List[Dict[str, Optional[int]]]) -> List[str]:
-        """
-        Decodes an incoming stream of variable-length code bits (L+D) and back-
-        references (the arguments to the stored copy literals) from the Huffman trees.
-        Returns a list of decoded path elements: (name, length, distance)
-        """
-        decoded = []
-        try:
-            while True:
-                sym = self._decode_symbol(lit_len_tree)
-                if sym < 256:  # Literal
-                    decoded.append(chr(sym))
-                    continue
-                if sym == 256:  # End of block
-                    break
-                # Length code 257..285
-                code = sym - 257
-                if code < 0 or code >= len(LENGTH_BASE):
-                    break
-                base_len = LENGTH_BASE[code]
-                extra_len_bits = LENGTH_EXTRA[code]
-                extra_len = self.reader.read_bits(
-                    extra_len_bits) if extra_len_bits else 0
-                match_len = base_len + extra_len
-
-                # Distance code 0..29
-                dist_sym = self._decode_symbol(dist_tree)
-                if dist_sym < 0 or dist_sym >= len(DIST_BASE):
-                    break
-                base_dist = DIST_BASE[dist_sym]
-                extra_dist_bits = DIST_EXTRA[dist_sym]
-                extra_dist = self.reader.read_bits(
-                    extra_dist_bits) if extra_dist_bits else 0
-                match_dist = base_dist + extra_dist
-
-                decoded.append(f"<{match_len},{match_dist}>")
-        except Exception:
-            pass
-        return decoded
-
-    def events(self) -> Iterable[Tuple[str, Union[str, Tuple[int, int], Dict]]]:
-        """Lazy event stream from the deflate parser.
-        Yields:
-          - ("literal", char)
-          - ("match", (length, distance))
-          - ("atom", {"id": atom_id, "label": atom_label})
-          - ("phase", phase)
-          - ("summary", {"glyphs": Counter})
-        """
-        while True:
-            info = self.process_block()
-            if info.get('end_of_stream'):
-                yield ("summary", {"glyphs": self.error_counts.copy()})
+        # Emit events based on parsed block
+        if info:
+            block_meta = info.get('meta', {})
+            if isinstance(block_meta, dict) and 'atom_id' in block_meta:
+                yield ("atom", {"id": block_meta.get('atom_id'), "label": block_meta.get('atom_label')})
+            if info.get('last_block'):
                 break
-            btype = info.get('block_type', -1)
-            if btype == -1:
-                yield ("summary", {"glyphs": self.error_counts.copy()})
-                break
-            if btype == 0:
-                meta = info.get('meta', {})
-                if isinstance(meta, dict) and 'atom_id' in meta:
-                    yield ("atom", {"id": meta.get('atom_id'), "label": meta.get('atom_label')})
-                # stored data is opaque here; consumer may inspect meta if desired
-                yield ("summary", {"glyphs": self.error_counts.copy()})
-                if info.get('last_block'):
-                    break
-                continue
             # Emit block event with type/meta for orientation logic upstream
-            block_meta = info.get('meta', {}) if isinstance(info, dict) else {}
-            kind = 'dynamic' if btype == 2 else (
-                'static' if btype == 1 else 'stored')
+            kind = 'dynamic' if block_type == 2 else (
+                'static' if block_type == 1 else 'stored')
             payload = {"type": kind}
             if isinstance(block_meta, dict):
                 ll = block_meta.get('lit_len_code_lengths', {})
@@ -612,16 +464,16 @@ class BlockProcessor:
                     payload['lit_len_code_lengths'] = ll
             yield ("block", payload)
             # Huffman-coded blocks: optionally emit phase hint
-            phase = int(self.stream.pos % 8)
+            phase = int(sp.stream.pos % 8)
             yield ("phase", {"phase": phase})
             # Decode payload to literals/matches, but keep minimal output
-            lit_heap = info.get('lit_len_tree')
-            dist_heap = info.get('dist_tree')
+            lit_heap = block_meta.get('lit_len_tree')
+            dist_heap = block_meta.get('dist_tree')
             if lit_heap and dist_heap:
                 try:
                     # Minimal literal-only walk to avoid buffering
                     while True:
-                        sym = self._decode_symbol(lit_heap)
+                        sym = sp._decode_symbol(lit_heap)
                         if sym < 256:
                             yield ("literal", chr(sym))
                             continue
@@ -634,22 +486,29 @@ class BlockProcessor:
                         base_len = LENGTH_BASE[code]
                         extra_len_bits = LENGTH_EXTRA[code]
                         match_len = base_len + \
-                            (self.reader.read_bits(extra_len_bits)
+                            (sp.reader.read_bits(extra_len_bits)
                              if extra_len_bits else 0)
-                        dist_sym = self._decode_symbol(dist_heap)
+                        dist_sym = sp._decode_symbol(dist_heap)
                         if dist_sym < 0 or dist_sym >= len(DIST_BASE):
                             break
                         base_dist = DIST_BASE[dist_sym]
                         extra_dist_bits = DIST_EXTRA[dist_sym]
                         match_dist = base_dist + \
-                            (self.reader.read_bits(extra_dist_bits)
+                            (sp.reader.read_bits(extra_dist_bits)
                              if extra_dist_bits else 0)
                         yield ("match", (int(match_len), int(match_dist)))
                 except Exception:
                     pass
-            yield ("summary", {"glyphs": self.error_counts.copy()})
-            if info.get('last_block'):
-                break
+        yield ("summary", {"glyphs": et.error_counts.copy()})
+        if info.get('last_block'):
+            break
+
+
+class StreamProcessor:
+    def __init__(self, stream_bytes: bytes):
+        self.stream = ConstBitStream(bytes=stream_bytes)
+        self.reader = BitLSB(self.stream)
+        self.max_pos = len(self.stream.bytes) * 8
 
     def _decode_symbol(self, tree: List[Dict[str, Optional[int]]]) -> int:
         """Decodes a single symbol by traversing the heap-based Huffman tree."""
@@ -660,7 +519,6 @@ class BlockProcessor:
             node = tree[idx]
             if node['value'] is not None:
                 return int(node['value'])
-            # Need another bit to descend
             bit = self.reader.read_bit()
             next_idx = node['right'] if bit else node['left']
             if next_idx is None:
