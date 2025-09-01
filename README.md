@@ -35,7 +35,9 @@ CE1{
 
 This specification serves as a bridge between the theoretical framework and practical implementation, defining the operational modes, data structures, and physical laws that govern the Metanion system.
 
-## VisualizationsThe paper includes three key visualizations:
+## Visualizations
+
+The paper includes three key visualizations:
 
 1. **Figure 1**: Mathematical visualization showing energy states, quaternion orientations, and geodesic evolution paths
 2. **Figure 2**: Energy-shaded Boolean cube with face shading and alpha inflation as height
