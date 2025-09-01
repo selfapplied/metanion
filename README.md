@@ -17,6 +17,24 @@ These elements form a fiber bundle with energy $\mathcal{E}(m)$ that records com
 
 ## Paper
 
+## CE1 Specification
+
+The Metanion Field Theory is anchored by the following CE1 seed:
+
+```ce1
+CE1{
+  lens=AUTOVERSE | METANION_COSMOS
+  mode=HilbertWalk
+  basis=Ξ=autoverse:law_basis
+  data={m_U, α_U, Q_U, E(m_U)}
+  ops=[Observe; Evolve; Inflate; Collapse; Decorate]
+  laws={conservation_of_information; gauge_invariance; α_duality; operadic_closure}
+  emit=Reality
+}
+```
+
+This specification serves as a bridge between the theoretical framework and practical implementation, defining the operational modes, data structures, and physical laws that govern the Metanion system.
+
 The complete theoretical framework is presented in:
 - **[Metanion Field Theory (PDF)](metanion_field_theory.pdf)** - The main paper
 - **[LaTeX Source](metanion_field_theory.tex)** - Source code for the paper
