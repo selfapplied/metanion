@@ -1,6 +1,7 @@
 import numpy as np
 import random
 from typing import List, Dict, Optional, Any
+from style import attune_text
 
 def generate_choreographed_text(engine, seed_text: str, result: Dict, length: int = 100) -> str:
     """
@@ -21,8 +22,7 @@ def generate_choreographed_text(engine, seed_text: str, result: Dict, length: in
     output_sequence = [current_token]
 
     # Use the color trail from the result for the choreographed walk
-    color_trail = result.color_trail if hasattr(
-        result, 'color_trail') else result.get('color_trail', [])
+    color_trail = result.get('color_trail', [])
     walk_steps = []
     if color_trail:
         # Use the deepest non-empty color trail
@@ -33,8 +33,7 @@ def generate_choreographed_text(engine, seed_text: str, result: Dict, length: in
 
     if not walk_steps:
         # Fallback to a simple walk using the final quaternion
-        final_qs = result.final_q if hasattr(
-            result, 'final_q') else result.get('final_q')
+        final_qs = result.get('final_q')
         if final_qs:
             q_final = final_qs[-1]
             s = np.clip(np.abs(q_final[2]), 0, 1)  # Saturation/novelty
@@ -93,13 +92,20 @@ def generate_text(engine, seed_text: str, banks: Optional[List[List[np.ndarray]]
         # Reconstruct a dummy result if not provided
         result = {'banks': banks, 'final_q': finals, 'color_trail': []}
 
-    if style == "choreographed":
-        return generate_choreographed_text(engine, seed_text, result, length)
-    elif style == "pheno":
-        return engine.generate_pheno_text(seed_text, result.banks if hasattr(result, 'banks') else result.get('banks'),
-                                          result.final_q if hasattr(
-                                              result, 'final_q') else result.get('final_q'),
-                                          sentences=max(1, length // 30))
+    # Resolve style/length against global vector
+    chosen_style, chosen_length = attune_text(style, length)
+    if chosen_length is None:
+        chosen_length = length
+
+    if chosen_style == "choreographed":
+        return generate_choreographed_text(engine, seed_text, result, chosen_length)
+    elif chosen_style == "pheno":
+        return engine.generate_pheno_text(
+            seed_text,
+            result.get('banks'),
+            result.get('final_q'),
+            sentences=max(1, chosen_length // 30)
+        )
     else:
         # Keep old styles as fallbacks if needed, but choreographed is the new default.
         return f"Unknown or unsupported generation style: {style}"

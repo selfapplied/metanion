@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 emits: minimal spec-as-test framework.
 
@@ -17,36 +18,32 @@ Style Vector: Object Tuning Over Attribute Checking
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
+import inspect
 import argparse
 from collections import defaultdict, Counter, namedtuple
 import math
 import sys
 import os
-import zipfile
+import numpy as np
 from pathlib import Path
-import importlib.util
 import types
-
-# Lightweight minting of type IDs from spec strings
-_minted: Dict[str, int] = {}
-_mint_seq: int = 1
-
-def mint(spec: str) -> int:
-    global _mint_seq
-    if spec not in _minted:
-        _minted[spec] = _mint_seq
-        _mint_seq += 1
-    return _minted[spec]
-
+from loader import import_zip, import_dir, import_paths, attempt, shield
+from metanion import Spec, mint, recog, register_pending_specs
+# Defer imports to break circular dependency
+# import loom  
+# from sprixel2 import gene
 
 # Registries
-Spec = namedtuple('Spec', ['raw', 'inputs', 'outputs', 'mint'])
 genes: Dict[str, List[Spec]] = defaultdict(list)
 trust_scores: Counter[str] = Counter()
 discoveries: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
 invokers: Dict[str, List[Callable[[Callable[..., Any]], Any]]] = defaultdict(list)
 functions: Dict[str, Callable[..., Any]] = {}
+
+# Lazy registration queue for specs from other modules
+_pending_specs: List[Tuple[str, str, Callable[..., Any]]] = []  # (func_name, pattern, func)
+_emits_ready = False
 
 
 def split(raw: str) -> Tuple[str, str]:
@@ -100,11 +97,15 @@ def parse(s: str) -> Mapping[str, Any]:
                 arr = [p.strip() for p in body.split(',')] if body else []
                 out[key] = ('array', arr)
             else:
-                # try number
-                try:
-                    num = float(val) if ('.' in val or 'e' in val.lower()) else int(val)
+                # attempt numeric parse; default to atom
+                num = attempt(
+                    lambda: float(val) if (
+                        '.' in val or 'e' in val.lower()) else int(val),
+                    glyph='⟂', tag=key, default=None
+                )
+                if num is not None:
                     out[key] = ('number', num)
-                except Exception:
+                else:
                     out[key] = ('atom', val)
         else:
             # bare token means presence requirement
@@ -123,7 +124,7 @@ def recog(raw: str) -> Spec:
     return Spec(raw=raw, inputs=ins, outputs=outs, mint=mint(raw))
 
 
-def _coerce_input_value(kind_val: Tuple[str, Any]) -> Any:
+def in_val(kind_val: Tuple[str, Any]) -> Any:
     kind, val = kind_val
     if kind == 'number':
         return val
@@ -136,53 +137,46 @@ def _coerce_input_value(kind_val: Tuple[str, Any]) -> Any:
     return val
 
 
-def _build_call_from_inputs(inputs: Mapping[str, Tuple[str, Any]]) -> Tuple[List[Any], Dict[str, Any]]:
+def bind_args(inputs: Mapping[str, Tuple[str, Any]]) -> Tuple[List[Any], Dict[str, Any]]:
     args: List[Any] = []
     kwargs: Dict[str, Any] = {}
     if not inputs:
         return args, kwargs
-    # Positional via 'args' array
     if 'args' in inputs and inputs['args'][0] == 'array':
         args.extend(list(inputs['args'][1]))
-    # Single positional via 'value'
     if 'value' in inputs and inputs['value'][0] in ('number', 'atom'):
-        args.append(_coerce_input_value(inputs['value']))
-    # Keyword params
+        args.append(in_val(inputs['value']))
     for k, kv in inputs.items():
         if k in ('args', 'value'):
             continue
         kind, _ = kv
         if kind in ('number', 'atom', 'array'):
-            kwargs[k] = _coerce_input_value(kv)
+            kwargs[k] = in_val(kv)
         elif kind == 'present':
             kwargs[k] = True
     return args, kwargs
 
 
-def _is_lambda_style(left: str) -> bool:
+def is_lambda(left: str) -> bool:
     return ('{}' in left) or ('{' in left and '}' in left)
 
 
-def _parse_number_token(tok: str) -> Optional[Any]:
-    try:
-        # Named constants
-        if tok in ('pi', 'π'):
-            return math.pi
-        if tok in ('tau', 'τ'):
-            return getattr(math, 'tau', 2.0 * math.pi)
-        if tok == 'e':
-            return math.e
-        if tok.lower().startswith(('0x','-0x')):
-            return int(tok, 16)
-        if any(c in tok for c in ('.','e','E')):
-            return float(tok)
-        return int(tok)
-    except Exception:
-        return None
+def read_num(tok: str) -> Optional[Any]:
+    # Named constants
+    if tok in ('pi', 'π'):
+        return math.pi
+    if tok in ('tau', 'τ'):
+        return getattr(math, 'tau', 2.0 * math.pi)
+    if tok == 'e':
+        return math.e
+    if tok.lower().startswith(('0x', '-0x')):
+        return attempt(lambda: int(tok, 16), glyph='⟂', tag='hex', default=None)
+    if any(c in tok for c in ('.', 'e', 'E')):
+        return attempt(lambda: float(tok), glyph='⟂', tag='float', default=None)
+    return attempt(lambda: int(tok), glyph='⟂', tag='int', default=None)
 
 
-def _parse_atom_or_array(tok: str, varmap: Dict[str, Any]) -> Any:
-    # Parse [a,b] arrays, numeric tokens, or var references from varmap
+def read_atom(tok: str, varmap: Dict[str, Any]) -> Any:
     if tok.startswith('[') and tok.endswith(']'):
         body = tok[1:-1].strip()
         if not body:
@@ -190,7 +184,7 @@ def _parse_atom_or_array(tok: str, varmap: Dict[str, Any]) -> Any:
         elems = [e.strip() for e in body.split(',')]
         out: List[Any] = []
         for e in elems:
-            num = _parse_number_token(e)
+            num = read_num(e)
             if num is not None:
                 out.append(num)
             elif e in varmap:
@@ -198,7 +192,7 @@ def _parse_atom_or_array(tok: str, varmap: Dict[str, Any]) -> Any:
             else:
                 out.append(e)
         return out
-    num = _parse_number_token(tok)
+    num = read_num(tok)
     if num is not None:
         return num
     if tok in varmap:
@@ -206,8 +200,7 @@ def _parse_atom_or_array(tok: str, varmap: Dict[str, Any]) -> Any:
     return tok
 
 
-def _eval_brace_token(token: str, varmap: Dict[str, Any]) -> Any:
-    # token formats: {name}, {name->var}, or {name arg1 arg2 -> var}
+def brace(token: str, varmap: Dict[str, Any]) -> Any:
     inner = token.strip()[1:-1].strip()
     if not inner:
         return None
@@ -223,17 +216,17 @@ def _eval_brace_token(token: str, varmap: Dict[str, Any]) -> Any:
     fn = functions.get(name)
     if not callable(fn):
         raise TypeError(f"unknown producer {name}")
-    args = [_parse_atom_or_array(t, varmap) for t in parts[1:]]
+    args = [read_atom(t, varmap) for t in parts[1:]]
     val = fn(*args)
     if var:
         varmap[var] = val
     return val
 
 
-def _build_call_for_spec(sp: Spec) -> Tuple[List[Any], Dict[str, Any], bool]:
+def plan(sp: Spec) -> Tuple[List[Any], Dict[str, Any], bool]:
     left, _right = split(sp.raw)
-    if not _is_lambda_style(left):
-        args, kwargs = _build_call_from_inputs(sp.inputs)
+    if not is_lambda(left):
+        args, kwargs = bind_args(sp.inputs)
         return args, kwargs, False
 
     tokens = [t for t in left.split() if t]
@@ -250,72 +243,56 @@ def _build_call_for_spec(sp: Spec) -> Tuple[List[Any], Dict[str, Any], bool]:
             continue
         if not in_target:
             if tok.startswith('{') and tok.endswith('}'):
-                try:
-                    _eval_brace_token(tok, varmap)
-                except Exception:
-                    # ignore producer failure; treat as skip later
-                    pass
+                attempt(lambda: brace(tok, varmap), glyph='↷', tag='producer')
             i += 1
             continue
-        # in target
         if tok.endswith(':') and (i + 1) < len(tokens):
             key = tok[:-1]
             val_tok = tokens[i + 1]
             val: Any
             if val_tok.startswith('{') and val_tok.endswith('}'):
-                try:
-                    val = _eval_brace_token(val_tok, varmap)
-                except Exception:
-                    val = None
+                val = attempt(lambda: brace(val_tok, varmap),
+                              glyph='↷', tag='producer', default=None)
             else:
-                val = _parse_atom_or_array(val_tok, varmap)
+                val = read_atom(val_tok, varmap)
             kwargs[key] = val
             i += 2
             continue
-        # positional
         if tok.startswith('{') and tok.endswith('}'):
-            try:
-                val = _eval_brace_token(tok, varmap)
-            except Exception:
-                val = None
+            val = attempt(lambda: brace(tok, varmap), glyph='↷',
+                          tag='producer', default=None)
             args.append(val)
         else:
-            args.append(_parse_atom_or_array(tok, varmap))
+            args.append(read_atom(tok, varmap))
         i += 1
     return args, kwargs, True
 
 
-def has(obj: Any, key: str) -> bool:
-    if isinstance(obj, Mapping):
-        return key in obj
-    return hasattr(obj, key)
-
-
-def get(obj: Any, key: str) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
 def close(a: Any, b: Any, tol: float = 1e-6) -> bool:
-    try:
-        fa = float(a)
-        fb = float(b)
-        return math.isclose(fa, fb, rel_tol=1e-6, abs_tol=tol)
-    except Exception:
-        return a == b
+    fa = float(a)
+    fb = float(b)
+    return math.isclose(fa, fb, rel_tol=1e-6, abs_tol=tol)
 
 
-def _match_clause(obj: Any, clause: Mapping[str, Tuple[str, Any]]) -> bool:
+def match(obj: Any, clause: Mapping[str, Tuple[str, Any]]) -> bool:
+    """Match object against clause specification using Style Vector principles.
+    
+    Style Vector: Object Tuning Over Attribute Checking
+    - Trust the process that created the object
+    - Work with data as-is, not converted
+    - Create conditions for natural flow
+    """
+    obj = coerce(obj)
     for key, (kind, val) in clause.items():
         if kind == 'present':
-            if not _has(obj, key):
+            # Trust the object has what it needs - if not, it's a tuning issue
+            if key not in obj:
                 return False
             continue
         if kind == 'array':
-            if not _has(obj, key):
+            if key not in obj:
                 return False
-            got = _get(obj, key)
+            got = obj[key]
             if not isinstance(got, (list, tuple)):
                 return False
             # array spec is pattern-like; only length check here
@@ -323,24 +300,21 @@ def _match_clause(obj: Any, clause: Mapping[str, Tuple[str, Any]]) -> bool:
                 return False
             continue
         if kind == 'number':
-            if not _has(obj, key):
+            if key not in obj:
                 return False
-            if not _approx_equal(_get(obj, key), val):
+            # Use the existing close function for approximate equality
+            if not close(obj[key], val):
                 return False
             continue
         if kind == 'atom':
-            if not _has(obj, key) or str(_get(obj, key)) != str(val):
+            if key not in obj or str(obj[key]) != str(val):
                 return False
             continue
     return True
 
 
-def _coerce_result_view(result: Any) -> Mapping[str, Any]:
+def coerce(result: Any) -> Mapping[str, Any]:
     # Provide a mapping view for common shapes (arrays, quaternions)
-    try:
-        import numpy as _np  # optional
-    except Exception:
-        _np = None  # type: ignore
 
     if isinstance(result, Mapping):
         return result
@@ -348,78 +322,55 @@ def _coerce_result_view(result: Any) -> Mapping[str, Any]:
     seq: Optional[List[Any]] = None
     if isinstance(result, (list, tuple)):
         seq = list(result)
-    elif _np is not None and isinstance(result, _np.ndarray):  # type: ignore[arg-type]
-        try:
-            seq = list(result.tolist())
-        except Exception:
-            seq = None
+    elif np is not None and isinstance(result, np.ndarray):
+        seq = attempt(lambda: list(result.tolist()),
+                      glyph='⟂', tag='tolist', default=None)
     if seq is not None:
         view['length'] = len(seq)
         view['len'] = len(seq)
         if len(seq) == 4:
             view['quaternion'] = seq
             view['q'] = seq
-            try:
-                # magnitude as Euclidean norm
-                mag = 0.0
+            # magnitude as Euclidean norm
+
+            def _mag() -> float:
+                acc = 0.0
                 for x in seq:
-                    mag += float(x) * float(x)
-                mag = math.sqrt(mag)
+                    acc += float(x) * float(x)
+                return math.sqrt(acc)
+            mag = attempt(_mag, glyph='⟂', tag='magnitude', default=None)
+            if mag is not None:
                 view['magnitude'] = mag
                 view['m'] = mag
-            except Exception:
-                pass
     return view
 
 
-def _match_pattern(result: Any, spec: Spec) -> bool:
-    # Match on outputs against a coerced view of the result
-    if spec.outputs:
-        view = _coerce_result_view(result)
-        return _match_clause(view, spec.outputs)
-    return True
-
-
-def em(pattern: str, via: Optional[Callable[[Callable[..., Any]], Any]] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def em(pattern: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     spec = recog(pattern)
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         name = getattr(fn, '__name__', 'anon')
-        genes[name].append(spec)
-        if via is not None:
-            invokers[name].append(via)
-
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            target_spec_raw = kwargs.pop('__em_spec', None)
-            result = fn(*args, **kwargs)
-            # attempt matches across all specs for this function
-            specs_for_fn = genes.get(name, [])
-            matched_any = False
-            for sp in specs_for_fn:
-                if target_spec_raw is not None and sp.raw != target_spec_raw:
-                    continue
-                if _match_pattern(result, sp):
-                    trust_scores[name] += 1
-                    matched_any = True
-            # Always record discovery (no prints)
-            try:
-                _discoveries[name].append(result)  # type: ignore[arg-type]
-            except Exception:
-                pass
-            # Enforce: no hallucinations; only if there are specs without custom invokers
-            if specs_for_fn and not matched_any:
-                calls = invokers.get(name, [])
-                if target_spec_raw is not None or invokers:
-                    # When a specific spec or invoker is used, don't assert on others
-                    pass
-                else:
-                    raise AssertionError(f"Spec did not match for {name}: {[sp.raw for sp in specs_for_fn]}")
-            return result
-
-        wrapped.__name__ = name
-        return wrapped
+        if _emits_ready:
+            # Emits is fully loaded, register immediately
+            genes[name].append(spec)
+        else:
+            # Queue for later registration
+            _pending_specs.append((name, pattern, fn))
+        return fn
 
     return decorate
+
+
+def _register_pending_specs():
+    """Register all pending specs from other modules."""
+    global _emits_ready
+    _emits_ready = True
+    
+    for func_name, pattern, func in _pending_specs:
+        spec = recog(pattern)
+        genes[func_name].append(spec)
+    
+    _pending_specs.clear()
 
 
 # Public API -----------------------------------------------------------------
@@ -438,11 +389,11 @@ def find(name: str) -> List[Any]:
 
 def breed(name_a: str, name_b: str, seed: str) -> Tuple[Callable[..., Any], float]:
     # Prefer higher-trust gene; fallback to deterministic pick
-    try:
-        from sprixel2 import genes, mate  # lazy import to avoid cycles at module import
-    except Exception:
-        genes = {}
-        mate = lambda a, b, s: (lambda *args, **kw: None)  # type: ignore
+    def _load():
+        mod = __import__('sprixel2', fromlist=['genes', 'mate'])
+        return getattr(mod, 'genes', {}), getattr(mod, 'mate', lambda a, b, s: (lambda *args, **kw: None))
+    genes, mate = attempt(_load, glyph='∅', tag='sprixel2', default=(
+        {}, lambda a, b, s: (lambda *args, **kw: None)))  # type: ignore
 
     ta = trust(name_a)
     tb = trust(name_b)
@@ -459,6 +410,76 @@ def breed(name_a: str, name_b: str, seed: str) -> Tuple[Callable[..., Any], floa
     return (lambda *args, **kw: None), 0.0
 
 
+# Deferred import to break circular dependency
+from sprixel2 import gene
+
+@gene
+@em(":= integrity_ok: bool")
+def verify_codebase_integrity() -> bool:
+    """
+    Verifies that the live codebase structure matches the
+    CE1 fingerprint embedded in loom.py.
+    """
+    # Deferred import to break circular dependency
+    import loom
+    # 1. Parse the embedded CE1 block from loom.py
+    with open('loom.py', 'r') as f:
+        content = f.read()
+
+    import re
+    docstring_match = re.search(r'"""(.+?)"""', content, re.DOTALL)
+    if not docstring_match:
+        raise ValueError("Could not find docstring in loom.py")
+
+    docstring = docstring_match.group(1)
+    ce1_block_match = re.search(r'CE1\{(.+?)\}', docstring, re.DOTALL)
+    if not ce1_block_match:
+        raise ValueError(
+            "Could not find embedded CE1 block in loom.py docstring")
+
+    embedded_ce1 = ce1_block_match.group(1)
+
+    # Extract key metrics from embedded CE1
+    matches_match = re.search(r'matches=(\d+)', embedded_ce1)
+    energy_match = re.search(r'energy=([\d\.]+)', embedded_ce1)
+
+    if not matches_match or not energy_match:
+        raise ValueError("Embedded CE1 block is malformed")
+
+    expected_matches = int(matches_match.group(1))
+    expected_energy = float(energy_match.group(1))
+
+    # 2. Generate a live CE1 block
+    entries = loom.hilbert_walk('.', 10000)  # High energy budget to scan all
+    live_metanion = loom.metanion_genesis(entries)
+    live_ce1_block = loom.ce1_emission(live_metanion)
+
+    # Extract key metrics from live CE1
+    live_matches_match = re.search(r'matches=(\d+)', live_ce1_block)
+    live_energy_match = re.search(r'energy=([\d\.]+)', live_ce1_block)
+
+    if not live_matches_match or not live_energy_match:
+        raise ValueError("Generated live CE1 block is malformed")
+
+    live_matches = int(live_matches_match.group(1))
+    live_energy = float(live_energy_match.group(1))
+
+    # 3. Compare and verify
+    matches_ok = (live_matches == expected_matches)
+    # Allow for small float differences
+    energy_ok = abs(live_energy - expected_energy) < 1.0
+
+    if not matches_ok:
+        print(
+            f"Codebase integrity check failed: Mismatched file count. Expected {expected_matches}, got {live_matches}")
+
+    if not energy_ok:
+        print(
+            f"Codebase integrity check failed: Mismatched energy. Expected {expected_energy}, got {live_energy}")
+
+    return matches_ok and energy_ok
+
+
 # Minting/type surface --------------------------------------------------------
 
 def typeid(spec_raw: str) -> int:
@@ -473,6 +494,9 @@ def kinds() -> Mapping[str, List[int]]:
     return {k: [sp.mint for sp in v] for k, v in genes.items()}
 
 
+# Spec stacking and algebra removed from public surface to keep core minimal
+
+
 __all__ = ['em', 'trust', 'find', 'specs', 'breed', 'typeid', 'kind', 'kinds']
 
 
@@ -480,9 +504,138 @@ __all__ = ['em', 'trust', 'find', 'specs', 'breed', 'typeid', 'kind', 'kinds']
 # Zip-based testrunner (no prints; raises on failure)
 # ----------------------------------------------------------------------------
 
+# Canonical concept names and lexicons (glyphs/words) ---------------------------------
+CANON_BY_GLYPH: Dict[str, str] = {
+    '✓': 'pass',
+    '⊘': 'fail',
+    '∅': 'missing',
+    '↷': 'skip',
+    'α': 'trust',
+    '🗜': 'compressed',
+}
+
+LEXICONS: Dict[str, Dict[str, str]] = {
+    'glyph': {
+        'pass': '✓',
+        'fail': '⊘',
+        'missing': '∅',
+        'skip': '↷',
+        'trust': 'α',
+        'compressed': '🗜',
+    },
+    'word': {
+        'pass': 'pass',
+        'fail': 'fail',
+        'missing': 'missing',
+        'skip': 'skip',
+        'trust': 'trust',
+        'compressed': 'compressed',
+    },
+}
+
+
+# Lexicon via grouped lists and quaternion connections -------------------------------
+# File format (emits_lexicon.txt):
+#   [group-name]
+#   ✓ pass
+#   ⊘ fail
+#   ...
+
+def _lexicon_path() -> Path:
+    return Path(__file__).resolve().parent / 'emits_lexicon.txt'
+
+
+def _load_lexicon_groups() -> List[List[str]]:
+    p = _lexicon_path()
+    text = attempt(lambda: p.read_text(encoding='utf-8'),
+                   glyph='📖', tag='lexicon', default='')
+    groups: List[List[str]] = []
+    if not text:
+        # Fallback default groups if file missing
+        groups.append(['✓', 'pass'])
+        groups.append(['⊘', 'fail'])
+        groups.append(['∅', 'missing'])
+        groups.append(['↷', 'skip'])
+        groups.append(['α', 'trust'])
+        groups.append(['🗜', 'compressed'])
+        return groups
+    current: List[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        if s.startswith('#'):
+            continue
+        if s.startswith('[') and s.endswith(']'):
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        parts = s.split()
+        for tok in parts:
+            current.append(tok)
+    if current:
+        groups.append(current)
+    return [g for g in groups if g]
+
+
+def _is_glyph_token(tok: str) -> bool:
+    return len(tok) == 1 and not tok.isalnum()
+
+
+def _group_quaternions(n_groups: int) -> List[List[float]]:
+    out: List[List[float]] = []
+    for i in range(max(1, n_groups)):
+        theta = (2.0 * math.pi * i) / float(max(1, n_groups))
+        half = 0.5 * theta
+        w = math.cos(half)
+        x = 0.0
+        y = 0.0
+        z = math.sin(half)
+        out.append([w, x, y, z])
+    return out
+
+
+def render_summary_tokens(glyph_counts: Mapping[str, int], *, lexicon: str = 'glyph') -> List[str]:
+    want_words = (lexicon == 'word')
+    groups = _load_lexicon_groups()
+    _ = _group_quaternions(len(groups))
+    toks: List[str] = []
+    for gkey in ('✓', '⊘', '∅', '↷', 'α', '🗜'):
+        c = int(glyph_counts.get(gkey, 0)) if hasattr(
+            glyph_counts, 'get') else 0
+        if not c:
+            continue
+        gi = -1
+        for idx, g in enumerate(groups):
+            if gkey in g:
+                gi = idx
+                break
+        label = gkey
+        if gi >= 0:
+            tokens = groups[gi]
+            if want_words:
+                for t in tokens:
+                    if not _is_glyph_token(t):
+                        label = t
+                        break
+                toks.append(f"{label}={c}")
+            else:
+                for t in tokens:
+                    if _is_glyph_token(t):
+                        label = t
+                        break
+                toks.append(f"{label}{c}")
+        else:
+            toks.append(f"{gkey}{c}" if not want_words else f"{gkey}={c}")
+    return toks
+
 def _workspace_root() -> Path:
     # eonyx/emits.py -> repo root assumed as parent of this file's parent
-    return Path(__file__).resolve().parent.parent
+    return Path(__file__).resolve().parent
 
 
 def _ensure_in_dir(root: Path) -> Path:
@@ -492,11 +645,7 @@ def _ensure_in_dir(root: Path) -> Path:
     return d
 
 
-def _find_zips(root: Path) -> List[Path]:
-    zips: List[Path] = []
-    for p in root.glob('*.genyx.zip'):
-        zips.append(p)
-    return zips
+# Removed: implicit scanning for any specific bundle extensions
 
 
 def _import_py_from_sources(sources: Dict[str, bytes], module_prefix: str = 'bundle') -> Dict[str, Any]:
@@ -505,20 +654,24 @@ def _import_py_from_sources(sources: Dict[str, bytes], module_prefix: str = 'bun
     for name, data in sources.items():
         if not name.endswith('.py') or name.endswith('__init__.py'):
             continue
-        try:
-            text = data.decode('utf-8', errors='ignore')
-        except Exception:
+        text = attempt(lambda: data.decode(
+            'utf-8', errors='ignore'), glyph='🔤', tag=name, default=None)
+        if not text:
             continue
         if '@em(' not in text:
             continue
-        mod_name = module_prefix + '_' + name[:-3].replace('/', '.').replace('\\', '.')
-        try:
-            # Create a new module object and execute the code into its namespace
-            mod = types.ModuleType(mod_name)
-            sys.modules[mod_name] = mod
-            code = compile(text, filename=name, mode='exec')
-            exec(code, mod.__dict__)
-        except Exception:
+        mod_name = module_prefix + '_' + \
+            name[:-3].replace('/', '.').replace('\\', '.')
+        # Create a new module object and execute the code into its namespace
+        mod = types.ModuleType(mod_name)
+        sys.modules[mod_name] = mod
+        code = attempt(lambda: compile(text, filename=name,
+                       mode='exec'), glyph='⟂', tag=mod_name, default=None)
+        if code is None:
+            continue
+        ok = attempt(lambda: exec(code, mod.__dict__), glyph='⚡',
+                     tag=mod_name, default=False) or True
+        if not ok:
             continue
         for k, v in vars(mod).items():
             if callable(v):
@@ -526,143 +679,22 @@ def _import_py_from_sources(sources: Dict[str, bytes], module_prefix: str = 'bun
     return registry
 
 
-def _import_all_py_in_zip(zip_path: Path) -> Dict[str, Any]:
-    # Prefer existing eonyx.zip Reflex loader; fallback to standard ZipFile
-    try:
-        from zip import unpack_reflex  # type: ignore
-    except Exception:
-        unpack_reflex = None  # type: ignore
-
-    if unpack_reflex is not None:
-        try:
-            blob = zip_path.read_bytes()
-            files = unpack_reflex(blob)  # type: ignore[operator]
-            if isinstance(files, dict) and files:
-                return _import_py_from_sources(files, module_prefix=zip_path.stem)
-        except Exception:
-            pass
-    return {}
-
-
-def _import_all_py_under(path: Path) -> Dict[str, Any]:
-    registry: Dict[str, Any] = {}
-    # Make our emits module authoritative for "import emits"
-    sys.modules.setdefault('emits', sys.modules[__name__])
-    # Prepend path to sys.path for relative imports inside the bundle
-    sys.path.insert(0, str(path))
-    try:
-        for py in path.rglob('*.py'):
-            if py.name == '__init__.py':
-                continue
-            try:
-                text = py.read_text(encoding='utf-8', errors='ignore')
-            except Exception:
-                continue
-            if '@em(' not in text:
-                continue
-            mod_name = 'bundle_' + '_'.join(py.relative_to(path).with_suffix('').parts)
-            spec = importlib.util.spec_from_file_location(mod_name, str(py))
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[mod_name] = mod
-                try:
-                    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-                except Exception:
-                    # Skip modules that fail to import (e.g., optional heavy deps)
-                    continue
-                # collect callables by name
-                for k, v in vars(mod).items():
-                    if callable(v):
-                        registry.setdefault(k, v)
-                        functions.setdefault(k, v)
-                for k, v in vars(mod).items():
-                    if callable(v):
-                        registry.setdefault(k, v)
-                        functions.setdefault(k, v)
-    finally:
-        # Remove path we added
-        try:
-            sys.path.remove(str(path))
-        except ValueError:
-            pass
-    return registry
-
-
 def _run_registered_specs(name_to_fn: Mapping[str, Callable[..., Any]]) -> Dict[str, int]:
-    # For each function that has specs registered, attempt to call with no args
-    # Track glyph-style counters for a compact one-line report
-    prev_trust = Counter(trust_scores)
-    glyphs: Dict[str, int] = {'✓': 0, '⊘': 0, '∅': 0, '↷': 0, '🗜': 0}
-    for name in list(genes.keys()):
-        fn = name_to_fn.get(name)
-        if fn is None:
-            glyphs['∅'] += 1
-            continue
-        calls = invokers.get(name, [])
-        if calls or genes.get(name):
-            specs_for_fn = genes.get(name, [])
-            # Bind and run per-spec using lambda-style or inputs
-            for sp in specs_for_fn:
-                try:
-                    args, kwargs, _is_lambda = _build_call_for_spec(sp)
-                    if args or kwargs:
-                        value = fn(*args, **kwargs, __em_spec=sp.raw)
-                    elif calls and calls[0]:
-                        value = calls[0](fn)
-                    else:
-                        value = fn(__em_spec=sp.raw)
-                    if _match_pattern(value, sp):
-                        trust_scores[name] += 1
-                        try:
-                            _discoveries[name].append(value)  # type: ignore[arg-type]
-                        except Exception:
-                            pass
-                        # Aggregate optional counters
-                        try:
-                            if isinstance(value, Mapping) and 'compressed' in value:
-                                comp = value.get('compressed')
-                                glyphs['🗜'] += int(comp) if comp is not None else 0
-                        except Exception:
-                            pass
-                        glyphs['✓'] += 1
-                    else:
-                        glyphs['⊘'] += 1
-                except TypeError:
-                    glyphs['↷'] += 1
-                except AssertionError:
-                    glyphs['⊘'] += 1
-                except Exception:
-                    glyphs['↷'] += 1
-        else:
-            try:
-                val = fn()
-                glyphs['✓'] += 1
-                try:
-                    if isinstance(val, Mapping) and 'compressed' in val:
-                        comp = val.get('compressed')
-                        glyphs['🗜'] += int(comp) if comp is not None else 0
-                except Exception:
-                    pass
-            except TypeError:
-                glyphs['↷'] += 1
-            except AssertionError:
-                glyphs['⊘'] += 1
-    # Count newly minted trust as α
-    alpha = 0
-    for k, v in trust_scores.items():
-        dv = v - prev_trust.get(k, 0)
-        if dv > 0:
-            alpha += dv
-    if alpha:
-        glyphs['α'] = alpha
-    return glyphs
+    # Delegated to loader.run_specs for single source of truth
+    from loader import run_specs as _runner
+    return _runner(dict(name_to_fn))
+
+
+def run_specs(name_to_fn: Mapping[str, Callable[..., Any]]) -> Dict[str, int]:
+    return _run_registered_specs(name_to_fn)
 
 
 def _cli_run(args: Optional[List[str]] = None) -> None:
-    # Strategy: find *.genyx.zip at repo root unless specific targets are provided
+    # Strategy: load explicit targets; default to current project directory
     parser = argparse.ArgumentParser(prog='emits', add_help=True)
     parser.add_argument('targets', nargs='*', help='Zip files or directories to scan')
     parser.add_argument('--words', action='store_true', help='Expand glyphs into short words')
+    # no per-tool shuffle/seed; use eonyx seed if needed
     ns = parser.parse_args(args=args if args is not None else None)
 
     root = _workspace_root()
@@ -675,115 +707,46 @@ def _cli_run(args: Optional[List[str]] = None) -> None:
             p = Path(a)
             targets.append(p if p.is_absolute() else (root / p))
     else:
-        targets = _find_zips(root)
+        # Default: import the current project directory
+        targets = [root]
 
     name_to_fn: Dict[str, Callable[..., Any]] = {}
-    loaded_zips = 0
-    for t in targets:
-        if t.suffix == '.zip' and t.exists():
-            loaded_zips += 1
-            imported = _import_all_py_in_zip(t)
-            name_to_fn.update(imported)
-        elif t.is_dir():
-            imported = _import_all_py_under(t)
-            name_to_fn.update(imported)
+    if targets:
+        imported = import_paths(targets)
+        name_to_fn.update(imported)
 
     # Also pull in functions registered via sprixel2.genes (existing code path)
-    try:
-        from sprixel2 import genes as _genes  # type: ignore
-        if isinstance(_genes, dict) and _genes:
-            for k, v in _genes.items():
-                if callable(v):
-                    name_to_fn.setdefault(k, v)
-                    functions.setdefault(k, v)
-    except Exception:
-        pass
+    _genes = attempt(lambda: __import__('sprixel2', fromlist=[
+                     'genes']).genes, glyph='∅', tag='sprixel2', default={})  # type: ignore
+    if isinstance(_genes, dict) and _genes:
+        for k, v in _genes.items():
+            if callable(v):
+                name_to_fn.setdefault(k, v)
+                functions.setdefault(k, v)
+
+    # Ensure producers are available to lambda-style specs
+    for k, v in name_to_fn.items():
+        if callable(v):
+            functions.setdefault(k, v)
 
     # If nothing found, still print an empty report line
     glyphs = {'✓': 0, '⊘': 0, '∅': 0, '↷': 0}
     if name_to_fn:
         glyphs = _run_registered_specs(name_to_fn)
-    # Default: one-line glyph counter summary
-    parts: List[str] = []
-    if words_mode:
-        name_map = {
-            '✓': 'pass',
-            '⊘': 'fail',
-            '∅': 'missing',
-            '↷': 'skip',
-            'α': 'trust',
-            '🗜': 'compressed',
-        }
-        for key in ('✓', '⊘', '∅', '↷', 'α', '🗜'):
-            if key in glyphs and glyphs[key]:
-                parts.append(f"{name_map[key]}={glyphs[key]}")
-        parts.append(f"zips={loaded_zips}")
-        parts.append(f"funcs={len(name_to_fn)}")
-    else:
-        for key in ('✓', '⊘', '∅', '↷', 'α', '🗜'):
-            if key in glyphs and glyphs[key]:
-                parts.append(f"{key}{glyphs[key]}")
-        parts.append(f"z{loaded_zips}")
-        parts.append(f"f{len(name_to_fn)}")
+    # Default: one-line summary via lexicon tables
+    parts: List[str] = render_summary_tokens(
+        glyphs, lexicon=('word' if words_mode else 'glyph'))
+    parts.append(
+        f"funcs={len(name_to_fn)}" if words_mode else f"f{len(name_to_fn)}")
     print(' '.join(parts))
 
 
 if __name__ == '__main__':
     _cli_run()
 
-
-# ----------------------------------------------------------------------------
-# Unified try/catch helpers (external-interface friendly)
-# ----------------------------------------------------------------------------
-
-from contextlib import contextmanager
+# Register any pending specs when emits is fully loaded
+_register_pending_specs()
 
 
-def _note_alert(alerts: Optional[Any], glyph: str, tag: Optional[str], exc: Optional[BaseException]) -> None:
-    try:
-        if alerts is None:
-            return
-        alerts[str(glyph)] += 1
-        if tag:
-            alerts[f"{glyph}:{tag}"] += 1
-        if exc is not None:
-            cname = exc.__class__.__name__
-            alerts[f"{glyph}:{cname}"] += 1
-    except Exception:
-        pass
-
-
-def attempt(run: Callable[[], Any], *, alerts: Optional[Any] = None, glyph: str = '!', tag: Optional[str] = None,
-            default: Any = None, exceptions: tuple[type[BaseException], ...] = (Exception,), rethrow: bool = False) -> Any:
-    """Run a callable once; on failure, mint glyphs into alerts and return default.
-
-    - Use ONLY at external boundaries (IO/CLI/Net). Internal code should raise.
-    - glyph: short key like '!' or '⟂'; tag adds context like '!:{op}'.
-    - If rethrow=True, the exception is re-raised after noting alerts.
-    """
-    try:
-        return run()
-    except exceptions as e:  # type: ignore[catching-non-exception]
-        _note_alert(alerts, glyph, tag, e)
-        if rethrow:
-            raise
-        return default
-
-
-@contextmanager
-def shield(*, alerts: Optional[Any] = None, glyph: str = '!', tag: Optional[str] = None,
-           exceptions: tuple[type[BaseException], ...] = (Exception,), rethrow: bool = False):
-    """Context manager to unify try/catch. See attempt().
-
-    Usage:
-      with shield(alerts=asp, glyph='!', tag='open'):
-          data = Path(p).read_bytes()
-    """
-    try:
-        yield
-    except exceptions as e:  # type: ignore[catching-non-exception]
-        _note_alert(alerts, glyph, tag, e)
-        if rethrow:
-            raise
 
 

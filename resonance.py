@@ -6,6 +6,9 @@ import numpy as np
 from genome import Genome
 from aspire import stable_str_hash
 import quaternion
+from emits import em
+
+from sprixel2 import gene
 
 
 @dataclasses.dataclass
@@ -15,7 +18,9 @@ class BlockEvent:
     lit_len_code_lengths: Dict[int, int] = dataclasses.field(default_factory=dict)
 
 
-def _axis_from_id(seed: int) -> np.ndarray:
+@gene
+@em("seed: int := axis: [3]")
+def axis_from_id(seed: int) -> np.ndarray:
     """Creates a normalized 3D vector from a 32-bit integer."""
     rng = np.random.RandomState(seed)
     axis = rng.rand(3) * 2 - 1
@@ -23,7 +28,9 @@ def _axis_from_id(seed: int) -> np.ndarray:
     return axis / norm if norm > 0 else np.array([0., 0., 1.])
 
 
-def get_rotation_from_block(event: BlockEvent, genome: Genome) -> Optional[np.ndarray]:
+@gene
+@em("event: BlockEvent, genome: Genome := rotation: Optional[ndarray]")
+def rotation_from_block(event: BlockEvent, genome: Genome) -> Optional[np.ndarray]:
     """
     Determines the quaternion rotation based on a dynamic block event and the
     genome's grammar. Returns the rotation quaternion, or None if no rotation
@@ -44,12 +51,15 @@ def get_rotation_from_block(event: BlockEvent, genome: Genome) -> Optional[np.nd
     else:
         # Fallback for rare tokens: hash the token itself
         shape_id = stable_str_hash(str(dominant_token))
-        axis = _axis_from_id(int(shape_id & 0xFFFFFFFF))
+        axis = axis_from_id(int(shape_id & 0xFFFFFFFF))
 
     ang = 0.2  # Dynamic block rotation angle
     return quaternion.axis_angle_quat(axis, ang)
 
-def calculate_shadowfold(grammar: "Grammar") -> Dict[str, float]:
+
+@gene
+@em("grammar: Grammar := shadowfold: Dict[str, float]")
+def grammar_shadowfold(grammar: "Grammar") -> Dict[str, float]:
     """
     Calculates the conceptual 'shadowfold' of a grammar.
 

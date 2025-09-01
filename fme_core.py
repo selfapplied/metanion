@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from tqdm.auto import tqdm
 import hashlib
 
-from fme_quaternion import quat_mul, quat_norm, axis_angle_quat
+from quaternion import quat_mul, quat_norm, axis_angle_quat
 import fme_color
 import fme_text_generation
 import fme_tokenization

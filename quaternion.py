@@ -19,7 +19,7 @@ This module provides the classical mechanics for this quantum world. It is the
 toolbox of pure geometry.
 """
 import numpy as np
-from emits import em
+from metanion import em
 
 @em("{} [1,0,0] 3.141592653589793 := m: 1.0")
 def axis_angle_quat(axis: np.ndarray, angle: float) -> np.ndarray:

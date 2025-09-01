@@ -25,18 +25,16 @@ This is not just about generating color palettes or sequences.
 It's about generating typed interpolants across a latent semantic space.
 """
 
+from tkinter import N
 from typing import Generic, TypeVar, List, Any, Union, Tuple, Literal, overload
 from itertools import chain
 import math
+from numbers import Number
 import numbers
 
 
 T = TypeVar("T")
 
-
-def _is_numeric(x: Any) -> bool:
-    """Checks if a value is a number, excluding bools."""
-    return isinstance(x, numbers.Number) and not isinstance(x, bool)
 
 
 class Wave(Generic[T]):
@@ -93,14 +91,8 @@ class Wave(Generic[T]):
         >>> Wave(*['a', 'b', 'c']).items
         ['a', 'b', 'c']
         """
-        self.items: List[T] = list(args)
-        if not self.items:
-            self.items = [""]  # type: ignore
-
-        if len(self.items) > 1:
-            self.pattern = list(chain(self.items, reversed(self.items[1:-1])))
-        else:
-            self.pattern = list(self.items)
+        self.items: List[T] = list(args) or []
+        self.pattern = list(chain(self.items, reversed(self.items[1:-1])))
         self.cycle_length = len(self.pattern)
 
     @property
@@ -126,37 +118,26 @@ class Wave(Generic[T]):
     @overload
     def __getitem__(self, key: float) -> T: ...
 
-    def __getitem__(self, key: Union[int, float, slice, tuple]) -> Union[T, 'Wave[T]', Any]:
+    def __getitem__(self, key: Union[int, float, slice, Tuple[Number, Any]]) -> Union[T, 'Wave[T]', Any]:
         """Accesses the wave, acting as a dimensional bridge or portal."""
-        # Polar/Euler mode: wave[r, theta] - handles both int and float first elements
-        if isinstance(key, tuple) and len(key) == 2 and _is_numeric(key[0]) and _is_numeric(key[1]):
-            r, theta = float(key[0]), float(key[1])
-            return self._euler_mode(r, theta)
+        # # Polar/Euler mode: wave[r, theta] - handles both int and float first elements
+        # if isinstance(key, tuple) and len(key) == 2 and
+        #     r, theta = float(key[0]), float(key[1])
+        #     return self._euler_mode(r, theta)
 
-        # Multi-scale indexing for single elements: wave[i, scale]
-        if isinstance(key, tuple):
-            if len(key) == 2:
-                idx, scale = key
-                if isinstance(idx, (int, float)):
-                    return self._get_at_scale(int(idx), scale)
-            raise TypeError(
-                "Multi-scale key must be an (int|float, scale) tuple.")
-
-        # Slicing: The dimensional bridge
-        if isinstance(key, slice):
-            if self.is_atomic:
-                # Promotion: Slicing an atomic wave defines the spread
-                start = key.start or 0
-                if key.stop is None:
-                    raise ValueError(
-                        "Slice on atomic Wave requires a stop value to define the spread.")
-                step = key.step or 1
-                atom = self.items[0]
-                new_items = [atom for _ in range(start, key.stop, step)]
-                return Wave(*new_items)
-            else:
-                # Stasis: Slicing a spread wave returns a new spread wave
+        match key:
+            case int():
+                return self._get_at_scale(int(key), scale)
+            case float():
+                return self._get_at_scale(int(key), scale)
+            case slice() if self.is_atomic:
                 return Wave(*self.pattern[key])
+            case slice():
+                # Promotion: Slicing an atomic wave defines the spread
+                return Wave(*self.pattern[key])
+            case [int(n), Number() as scale]:
+                return self._get_at_scale(n, scale)
+        # Multi-scale indexing for single elements: wave[i, scale]
 
         # Integer/float indexing - both handled by investment logic for atomic waves
         if isinstance(key, (int, float)):
@@ -167,8 +148,7 @@ class Wave(Generic[T]):
                 # Reduction: Indexing a spread wave returns the raw element
                 return self.pattern[int(key) % self.cycle_length]
 
-        # This should never be reached due to overloads, but provides runtime safety
-        raise TypeError(f"Unsupported key type for Wave: {type(key)}")
+        # Don't put a fallback here.
 
     def _get_at_scale(self, n: int, scale) -> Any:
         """Get index n at the specified scale/delimiter/phase."""
@@ -355,5 +335,14 @@ def wave(*args: T) -> Wave[T]:
     """Create a wave object from any sequence."""
     return Wave(*args)
 
-
 __all__ = ["wave"]
+
+
+def main():
+    import doctest
+    result = doctest.testmod(report=True)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()

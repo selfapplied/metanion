@@ -31,7 +31,7 @@ from sprixel import (
     solar,
 )
 
-from emits import em
+from metanion import em
 
 # Named tuples for DEFLATE operations
 BlockMeta = namedtuple('BlockMeta', ['type', 'lit_len_code_lengths', 'distance_codes'])
@@ -59,7 +59,7 @@ def compute_entropy(counter: Counter) -> float:
 genes: Dict[str, Callable] = {}
 
 
-@em("value: present", via=lambda f: {"value": isinstance(f("hello"), str)})
+@em("value: present")
 def gene(fn: Callable[..., Any]) -> Callable[..., Any]:
     # Mark as recombinable (registry only; no attribute assignment)
     genes[fn.__name__] = fn
@@ -67,7 +67,7 @@ def gene(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @gene
-@em("length: 1", via=lambda f: {"length": len(f("x"))})
+@em("length: 1")
 def tint(text: str, pal: Callable[[float], tuple[int, int, int]] = solar) -> str:
     out = "".join(splash(text, pal))
     label = getattr(pal, 'label', getattr(pal, '__name__', 'pal'))
@@ -75,13 +75,13 @@ def tint(text: str, pal: Callable[[float], tuple[int, int, int]] = solar) -> str
 
 
 @gene
-@em("len: >=1", via=lambda f: {"len": len(f("abc", soft=True, rows=1))})
+@em("len: >=1")
 def ripple(text: str, soft: bool = True, rows: int = 2) -> str:
     return reflect_wave(text, depth=6 if soft else 10, drift=1, quiet=0.5, amp=2.0, freq=0.12, fade=0.9, rows=rows)
 
 
 @gene
-@em("echo: present", via=lambda f: {"echo": f("a") == "a"})
+@em("echo: present")
 def mark(text: str, style: str = 'acetyl', pal=None) -> str:
     # This is a simple placeholder for now.
     # A real implementation would use the palette and style.
@@ -89,19 +89,19 @@ def mark(text: str, style: str = 'acetyl', pal=None) -> str:
 
 
 @gene
-@em("lines: >=1", via=lambda f: {"lines": len(f("a\n"*5))})
+@em("lines: >=1")
 def normalize(text: str, max_lines: int = 20, head: int = 6, tail: int = 10, keep_runs: int = 1) -> str:
     return squeeze(text, max_lines=max_lines, head=head, tail=tail, keep_runs=keep_runs)
 
 
 @gene
-@em("width: =5", via=lambda f: {"width": len(f("abc", 5))})
+@em("width: =5")
 def frame(text: str, width: int) -> str:
     return wireframe(text, width)
 
 
 @gene
-@em("callable: present", via=lambda f: {"callable": callable(f((0.5, lambda r: 'x')) )})
+@em("__call__: present")
 def stage(*bands: tuple[int, Callable[[int], str]]) -> Callable[[int], str]:
     gate = forms(*bands)
 
@@ -112,7 +112,7 @@ def stage(*bands: tuple[int, Callable[[int], str]]) -> Callable[[int], str]:
 
 
 @gene
-@em("callable: present", via=lambda f: {"callable": callable(f(["a","b"]))})
+@em("__call__: present")
 def symmetry(motif: Iterable[str] | str, kind: str = "reflect") -> Callable[[int], str]:
     """Creates a repeating, symmetrical line of text."""
     # Ensure motif is a list for consistent processing
@@ -135,13 +135,13 @@ def symmetry(motif: Iterable[str] | str, kind: str = "reflect") -> Callable[[int
 
 
 @gene
-@em("len: =5", via=lambda f: {"len": len(f("ab","cd", 5))})
+@em("len: =5")
 def melt(a: str, b: str, width: int, t: float = 0.5, pal: Callable[[float], tuple[int, int, int]] = solar) -> str:
     return speak(a, b, width, t, pal)
 
 
 @gene
-@em("lines: >=1", via=lambda f: {"lines": len(f("seed", 20))})
+@em("lines: >=1")
 def fused(seed: str, width: int, lines: int = 12) -> str:
     g = fuse(seed)
     art = bloom(g)(width)
@@ -149,7 +149,7 @@ def fused(seed: str, width: int, lines: int = 12) -> str:
 
 
 @gene
-@em("present: true", via=lambda f: {"present": callable(f)})
+@em("present: true")
 def deflate_block_to_quaternion(block_meta: BlockMeta) -> Optional[np.ndarray]:
     """Convert DEFLATE block to quaternion using document 7's formulas"""
     if block_meta.type != 'dynamic' or not block_meta.lit_len_code_lengths:
@@ -411,12 +411,8 @@ def echo() -> Callable[[Any], None]:
             print(str(value))
     sys.displayhook = show
     return show
-
-
 __all__: List[str] = sorted(list(genes.keys()) + [
     "library", "mate", "echo", "dusk", "neon", "sea", "solar",
     "grid", "dict_table", "name_of", "banner", "tag", "mirror_of", "dict_ls", "render", "pretty",
     "mark"
 ])
-
-

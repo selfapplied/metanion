@@ -26,56 +26,9 @@ T = TypeVar("T")
 U = TypeVar("U")
 
 
-def _is_numeric(x: Any) -> bool:
+def is_number(x: Any) -> bool:
     """Checks if a value is a number, excluding bools."""
     return isinstance(x, numbers.Number) and not isinstance(x, bool)
-
-
-__all__ = [
-    "signal",
-    "parametric",
-    "layout",
-    "responsive",
-    "hue",
-    "dye",
-    "rainbow",
-    "wash",
-    "showcase",
-    "switch",
-    "forms",
-    "dialog",
-    "columns",
-    "fog",
-    "shade",
-    "reflect",
-    "blend",
-    "fromhex",
-    "ramp",
-    "splash",
-    "dusk",
-    "neon",
-    "sea",
-    "earth",
-    "fire",
-    "ice",
-    "pastel",
-    "mono",
-    "solar",
-    "wavechar",
-    "waveset",
-    "reflect_wave",
-    "seed",
-    "splice",
-    "bloom",
-    "squeeze",
-    "fuse",
-    "lex",
-    "phrase",
-    "speak",
-    "novel",
-    "wire",
-]
-
 
 class Parametric[U]:
     """Protocol for functions that transform position ratios into parameter space."""
@@ -104,7 +57,8 @@ def signal(seq: Iterable[T], morph: Optional[Callable[[T, int, int], Any]] = Non
         scaled = signal(["╔", "╦", "╗"], scale)
         scaled(5)
     """
-    loop = wave(seq)
+    # Unpack the sequence into individual arguments for wave
+    loop = wave(*seq)
 
     def at(n: int, *args: Any, **kw: Any) -> List[Any]:
         view = list(islice(loop, n))
@@ -134,7 +88,7 @@ def parametric(base: Iterable[T], phi: Parametric[U],
         bright = parametric(["X", "Y", "Z"], lambda r: math.exp(2*r)-1, emit=paint)
         bright(6)
     """
-    loop = wave(base)
+    loop = wave(*base)
 
     def at(n: int) -> List[Any]:
         out: List[Any] = []
@@ -401,7 +355,7 @@ def thermal_palette(base_color: tuple[int, int, int], temp_vector: list[float],
         'energy_release', 'gravity_direction', 'semantic_description', 'stops'
     ])
     
-    def _compute_thermal_acceleration(temps: list[float], positions: list[float]) -> float:
+    def heat_accel(temps: list[float], positions: list[float]) -> float:
         """Compute how quickly temperature changes across the palette"""
         if len(temps) < 2:
             return 0.0
@@ -414,13 +368,13 @@ def thermal_palette(base_color: tuple[int, int, int], temp_vector: list[float],
             return 0.0
         return (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
     
-    def _compute_energy_release(temps: list[float]) -> float:
+    def energy_release(temps: list[float]) -> float:
         """Compute the total energy change across the thermal vector"""
         if len(temps) < 2:
             return 0.0
         return sum(abs(temps[i] - temps[i-1]) for i in range(1, len(temps)))
     
-    def _determine_gravity_direction(temps: list[float]) -> str:
+    def gravity_dir(temps: list[float]) -> str:
         """Determine the overall gravitational direction"""
         if not temps:
             return "neutral"
@@ -432,7 +386,7 @@ def thermal_palette(base_color: tuple[int, int, int], temp_vector: list[float],
         else:
             return "neutral"
     
-    def _generate_semantic_description(temps: list[float]) -> str:
+    def describe_heat(temps: list[float]) -> str:
         """Generate a semantic description of the thermal pattern"""
         if len(temps) < 2:
             return "Single Temperature"
@@ -456,20 +410,23 @@ def thermal_palette(base_color: tuple[int, int, int], temp_vector: list[float],
     
     # Create and attach the analysis
     temp_range = max(temp_vector) - min(temp_vector)
-    temp_acceleration = _compute_thermal_acceleration(temp_vector, stops)
-    energy_release = _compute_energy_release(temp_vector)
-    gravity_direction = _determine_gravity_direction(temp_vector)
-    semantic_description = _generate_semantic_description(temp_vector)
+    temp_acceleration = heat_accel(temp_vector, stops)
+    energy_total = energy_release(temp_vector)
+    gravity_direction = gravity_dir(temp_vector)
+    semantic_description = describe_heat(temp_vector)
     
-    palette_func.thermal_analysis = ThermalAnalysis(
+    try:
+        setattr(palette_func, 'thermal_analysis', ThermalAnalysis(
         temp_vector=temp_vector,
         temp_range=temp_range,
         thermal_acceleration=temp_acceleration,
-        energy_release=energy_release,
+            energy_release=energy_total,
         gravity_direction=gravity_direction,
         semantic_description=semantic_description,
         stops=stops
-    )
+        ))
+    except Exception:
+        pass
     
     return palette_func
 
@@ -616,7 +573,7 @@ def forms(*bands: tuple[int, Callable[[int], str]]) -> Callable[[int], Callable[
     return at
 
 
-def _center(text: str, n: int) -> str:
+def center_text(text: str, n: int) -> str:
     if n <= 0:
         return ""
     s = text[:n]
@@ -626,7 +583,7 @@ def _center(text: str, n: int) -> str:
     return (" " * left) + s + (" " * right)
 
 
-def _pad(text: str, n: int) -> str:
+def pad_text(text: str, n: int) -> str:
     s = text[:n]
     return s + (" " * max(0, n - len(s)))
 
@@ -643,24 +600,24 @@ def dialog(title: str, body: Iterable[str], gate: Optional[Callable[[int], Calla
     def ascii_box(width: int) -> str:
         inner = max(10, width - 4)
         top = "+" + ("-" * inner) + "+"
-        cap = "|" + _center(title, inner) + "|"
-        mid = ["|" + _pad(x, inner) + "|" for x in lines]
+        cap = "|" + center_text(title, inner) + "|"
+        mid = ["|" + pad_text(x, inner) + "|" for x in lines]
         bot = "+" + ("-" * inner) + "+"
         return "\n".join([top, cap] + mid + [bot])
 
     def light_box(width: int) -> str:
         inner = max(12, width - 4)
         top = "┌" + ("─" * inner) + "┐"
-        cap = "│" + _center(title, inner) + "│"
-        mid = ["│" + _pad(x, inner) + "│" for x in lines]
+        cap = "│" + center_text(title, inner) + "│"
+        mid = ["│" + pad_text(x, inner) + "│" for x in lines]
         bot = "└" + ("─" * inner) + "┘"
         return "\n".join([top, cap] + mid + [bot])
 
     def bold_box(width: int) -> str:
         inner = max(16, width - 6)
         top = "╔" + ("═" * inner) + "╗"
-        cap = "║" + _center(title, inner) + "║"
-        mid = ["║" + _pad(x, inner) + "║" for x in lines]
+        cap = "║" + center_text(title, inner) + "║"
+        mid = ["║" + pad_text(x, inner) + "║" for x in lines]
         bot = "╚" + ("═" * inner) + "╝"
         return "\n".join([top, cap] + mid + [bot])
 
@@ -679,7 +636,7 @@ def dialog(title: str, body: Iterable[str], gate: Optional[Callable[[int], Calla
     return show
 
 
-def _wrap_lines(text: str, width: int) -> list[str]:
+def wrap_lines(text: str, width: int) -> list[str]:
     if width <= 0:
         return []
     words = text.split()
@@ -728,8 +685,8 @@ def columns(left: Iterable[str], right: Iterable[str], gap: int = 3) -> Callable
         lw = max(10, lw)
         rw = max(10, rw)
 
-        Lw = [ln for x in L for ln in _wrap_lines(x, lw)]
-        Rw = [ln for x in R for ln in _wrap_lines(x, rw)]
+        Lw = [ln for x in L for ln in wrap_lines(x, lw)]
+        Rw = [ln for x in R for ln in wrap_lines(x, rw)]
 
         h = max(len(Lw), len(Rw))
         Lw += [""] * (h - len(Lw))
@@ -737,7 +694,7 @@ def columns(left: Iterable[str], right: Iterable[str], gap: int = 3) -> Callable
 
         out = []
         for a, b in zip(Lw, Rw):
-            out.append(_pad(a, lw) + (" " * g) + _pad(b, rw))
+            out.append(pad_text(a, lw) + (" " * g) + pad_text(b, rw))
         return "\n".join(out)
 
     return render
@@ -785,7 +742,7 @@ def reflect(text: Iterable[str] | str, depth: int = 8, drift: int = 1, quiet: fl
     return "\n".join(out)
 
 
-def _muffle(ch: str, clarity: float) -> str:
+def muffle(ch: str, clarity: float) -> str:
     """Return a softened glyph as clarity drops to 0."""
     if ch.isspace():
         return ch
@@ -885,7 +842,7 @@ def reflect_wave(
             ch = base_line[src]
             lum = quiet * (1.0 - i / (depth + 1)) * (0.75 + 0.25 * math.cos(k * x + phase + i * 0.6))
             clarity = max(0.0, 1.0 - hush * (i / (depth + 1)))
-            y.append(shade(_muffle(ch, clarity), max(0.0, min(1.0, lum))))
+            y.append(shade(muffle(ch, clarity), max(0.0, min(1.0, lum))))
         rowshift = 0
         if sway != 0.0:
             rowshift = int(round(sway * damp * math.sin(swayfreq * i + phase)))
@@ -1054,7 +1011,7 @@ def lex(text: str) -> list[str]:
     return parts if parts else [text]
 
 
-def _common_prefix(a: str, b: str) -> str:
+def common_prefix(a: str, b: str) -> str:
     n = min(len(a), len(b))
     i = 0
     while i < n and a[i] == b[i]:
@@ -1062,7 +1019,7 @@ def _common_prefix(a: str, b: str) -> str:
     return a[:i]
 
 
-def _common_suffix(a: str, b: str) -> str:
+def common_suffix(a: str, b: str) -> str:
     n = min(len(a), len(b))
     i = 0
     while i < n and a[-1 - i] == b[-1 - i]:
@@ -1070,12 +1027,13 @@ def _common_suffix(a: str, b: str) -> str:
     return a[len(a) - i:] if i else ""
 
 
-def _blend_word(a: str, b: str, t: float) -> str:
+def blend_word(a: str, b: str, t: float) -> str:
     """Blend two words by preserving common prefix/suffix and mixing middle.
     Bias the split point to the nearest vowel/consonant boundary.
     """
-    pref = _common_prefix(a, b)
-    suff = _common_suffix(a[len(pref):] if len(pref) < len(a) else a, b[len(pref):] if len(pref) < len(b) else b)
+    pref = common_prefix(a, b)
+    suff = common_suffix(a[len(pref):] if len(pref) < len(
+        a) else a, b[len(pref):] if len(pref) < len(b) else b)
     core_a = a[len(pref):len(a) - len(suff) if len(suff) else len(a)]
     core_b = b[len(pref):len(b) - len(suff) if len(suff) else len(b)]
     m = max(len(core_a), len(core_b))
@@ -1140,7 +1098,7 @@ def phrase(a: str, b: str, t: float, levels: int = 3) -> str:
         ai = ta[i]
         bi = tb[i]
         if ai.isalnum() and bi.isalnum():
-            out.append(_blend_word(ai, bi, weight(i)))
+            out.append(blend_word(ai, bi, weight(i)))
         else:
             out.append(bi if weight(i) > 0.5 else ai)
     return "".join(out)
@@ -1149,19 +1107,19 @@ def phrase(a: str, b: str, t: float, levels: int = 3) -> str:
 def speak(a: str, b: str, width: int, t: float, pal: Optional[Callable[[float], tuple[int, int, int]]] = None) -> str:
     """Blend two phrases at t and color-wash them, centered to width."""
     line = phrase(a, b, t)
-    centered = _center(line, width)
+    centered = center_text(line, width)
     colored = "".join(wash(centered, pal=pal))
     return colored
 
 
 # --- Novelty-driven palette splicing ---------------------------------------
 
-def _norm_word(w: str) -> str:
+def norm_word(w: str) -> str:
     import re
     return re.sub(r"[^A-Za-z0-9_]+", "", w).lower()
 
 
-def _chunk_words(words: List[str], max_words: int = 8) -> List[List[str]]:
+def chunk_words(words: List[str], max_words: int = 8) -> List[List[str]]:
     out: List[List[str]] = []
     cur: List[str] = []
     for w in words:
@@ -1174,7 +1132,7 @@ def _chunk_words(words: List[str], max_words: int = 8) -> List[List[str]]:
     return out
 
 
-def _palette_for(score: float) -> Callable[[float], tuple[int, int, int]]:
+def palette_for(score: float) -> Callable[[float], tuple[int, int, int]]:
     s = max(0.0, min(1.0, score))
     if s < 0.15:
         return mono
@@ -1195,11 +1153,11 @@ def novel(text: str) -> Callable[[int], str]:
     Novelty is fraction of new (not seen before) normalized words within a chunk.
     """
     words = text.split()
-    chunks = _chunk_words(words, max_words=8)
+    chunks = chunk_words(words, max_words=8)
     seen: set[str] = set()
     scored: List[tuple[str, float]] = []
     for ch in chunks:
-        toks = [_norm_word(w) for w in ch]
+        toks = [norm_word(w) for w in ch]
         toks = [t for t in toks if t]
         if not toks:
             scored.append((" ".join(ch), 0.0))
@@ -1213,8 +1171,8 @@ def novel(text: str) -> Callable[[int], str]:
     def at(width: int) -> str:
         lines: List[str] = []
         for text_chunk, score in scored:
-            pal = _palette_for(score)
-            centered = _center(text_chunk, width)
+            pal = palette_for(score)
+            centered = center_text(text_chunk, width)
             colored = "".join(splash(centered, pal))
             lines.append(colored)
         # Subtle unified reflection beneath
@@ -1239,7 +1197,7 @@ def wire(text: str, width: int) -> str:
     return "\n".join([top] + mid + [bot])
 
 
-def _rng_from_seed(text: str) -> random.Random:
+def rng_from_seed(text: str) -> random.Random:
     h = hashlib.sha256(text.encode("utf-8", errors="ignore")).digest()
     return random.Random(int.from_bytes(h, "big"))
 
@@ -1249,7 +1207,7 @@ def fuse(text: str) -> dict:
     Deterministically generate a spliced genome from seed text.
     Picks two motifs, palettes, and effect params based on the seed, then splices.
     """
-    r = _rng_from_seed(text)
+    r = rng_from_seed(text)
 
     motif_pool: List[Iterable[str] | str] = [
         ["◆", "◇"], ["□", "◇"], ["▲", "△"], ["╔", "╦", "╗"], ["╚", "╩", "╝"],

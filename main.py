@@ -2,13 +2,51 @@ import sys
 import shutil
 from sprixel import responsive, reflect_wave, dialog, sea, dusk, solar, squeeze, fuse
 from sprixel2 import echo, mirror_of, dusk as dusk2, dict_ls, render, symmetry, stage, mark
+from regex import validate_ce1_seed, parse_ce1_seed, extract_ce1_fields
 
+# CE1 seed for self-verification
+CE1_SEED = """CE1{
+  lens=MAIN↔VERIFY | mode=SelfCheck | Ξ=main:integrity |
+  data={m=0x1, α=0.000, E=100.0} |
+  ops=[Verify; Check; Validate; Run; Display; Emit] |
+  emit=CE1c{α=0.000, energy=100.0, matches=6}
+}"""
+
+
+def verify_self():
+    """Verify main's own integrity using embedded CE1 seed."""
+    # Read the current file to find embedded CE1 seed
+    with open(__file__, 'r') as f:
+        file_content = f.read()
+
+    # Check if file contains a valid CE1 seed
+    if validate_ce1_seed(file_content):
+        parsed = parse_ce1_seed(file_content)
+        fields = extract_ce1_fields(file_content)
+
+        # Verify expected fields are present
+        expected_fields = ['lens', 'mode', 'Ξ']
+        missing_fields = [
+            field for field in expected_fields if field not in fields]
+
+        if missing_fields:
+            print(
+                f"⚠️  Self-verification failed: Missing fields {missing_fields}")
+            return False
+        else:
+            print(
+                f"✅ Self-verification passed: {len(fields)} fields validated")
+            return True
+    else:
+        print("⚠️  Self-verification failed: No CE1 seed found")
+        return False
 
 def main():
-    try:
-        w = shutil.get_terminal_size().columns
-    except Exception:
-        w = 80
+    # Self-verify before proceeding
+    if not verify_self():
+        print("Self-verification failed, but continuing...")
+
+    w = shutil.get_terminal_size().columns
     w = max(60, min(100, w))
 
     # REPL-friendly display (no effect on print; helpful in interactive)

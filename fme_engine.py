@@ -1,7 +1,7 @@
 from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
 import random
-from fme_quaternion import quat_mul, quat_norm, axis_angle_quat
+from quaternion import quat_mul, quat_norm, axis_angle_quat
 import fme_color
 from collections import namedtuple
 

@@ -16,12 +16,15 @@ import ast
 from aspire import Opix, stable_str_hash
 from genome import Genome, Grammar, SeedConfig
 import quaternion
-from resonance import BlockEvent, get_rotation_from_block
+from resonance import BlockEvent, rotation_from_block
 from deflate import stream_events
 from collections import namedtuple
 from tokenizer import Tokenizer
 from branch import BranchCutter, BranchState
 from color import ColorEngine
+from emits import em
+
+from sprixel2 import gene
 
 # --- Function-table bitmask (inputs) ---
 IN_NAME  = 1 << 0
@@ -46,6 +49,37 @@ World = namedtuple('World', ['name', 'last_at', 'glyph', 'bits', 'types'])
 # --- World Record ---
 # A receipt for the computation on an asset, stored in the grammar.
 WorldRecord = namedtuple('WorldRecord', ['name', 'glyph', 'bits', 'stats'])
+
+# --- Gene Functions ---
+
+@gene
+@em("seed: str := glyph: str")
+def generate_glyph(seed: str) -> str:
+    """Generate Greek letter glyph from seed string."""
+    GLYPHS = "αβγδεζηθικλμνξοπρστυφχψω"
+    h = hashlib.sha256(seed.encode('utf-8')).digest()
+    return GLYPHS[int.from_bytes(h[:2], 'little') % len(GLYPHS)]
+
+@gene
+@em("s: str, max_len: int := sanitized: str")
+def sanitize_name(s: str, max_len: int = 32) -> str:
+    """Sanitize string for use as identifier."""
+    s2 = ''.join(ch if (ch.isalnum() or ch in ('-', '_')) else '-' for ch in s)
+    s2 = s2.strip('-_')
+    return s2[:max_len] if s2 else 'world'
+
+@gene
+@em("token_a: str, token_b: str := fused_token: str")
+def fuse_tokens(token_a: str, token_b: str) -> str:
+    """Merge two tokens into a molecular token."""
+    return f"{token_a}{token_b}"
+
+@gene
+@em("allele_a: ndarray, allele_b: ndarray := fused_allele: ndarray")
+def fuse_alleles(allele_a: np.ndarray, allele_b: np.ndarray) -> np.ndarray:
+    """Fuse two quaternion alleles using quaternion multiplication."""
+    new_allele = quaternion.quat_mul(allele_a, allele_b)
+    return quaternion.quat_norm(new_allele)
 
 # --- Operators ---
 
@@ -89,10 +123,7 @@ class RecordManager:
             self.genome.grammar.unigram_counts[key] = repr(record)
 
     def sanitize(self, s: str, max_len: int = 32) -> str:
-        s2 = ''.join(ch if (ch.isalnum() or ch in ('-', '_'))
-                     else '-' for ch in s)
-        s2 = s2.strip('-_')
-        return s2[:max_len] if s2 else 'world'
+        return sanitize_name(s, max_len)
 
     def gen_name(self, context: str) -> str:
         ctx_tokens = [t.lower()
@@ -119,9 +150,7 @@ class RecordManager:
         return self.sanitize('-'.join(parts))
 
     def gen_glyph(self, seed: str) -> str:
-        GLYPHS = "αβγδεζηθικλμνξοπρστυφχψω"
-        h = hashlib.sha256(seed.encode('utf-8')).digest()
-        return GLYPHS[int.from_bytes(h[:2], 'little') % len(GLYPHS)]
+        return generate_glyph(seed)
 
 
 # --- Core Engine ---
@@ -305,7 +334,7 @@ class CE1Core:
 
     def _fuse_tokens(self, token_a: str, token_b: str):
         """Merges two tokens into a new, higher-level token (a 'molecule')."""
-        new_token = f"{token_a}{token_b}"
+        new_token = fuse_tokens(token_a, token_b)
         
         # If this molecule already exists, just reinforce its count
         if new_token in self.grammar.unigram_counts:
@@ -318,8 +347,7 @@ class CE1Core:
         # Create a new semantic allele by combining the parents
         allele_a = self.grammar.semantic_alleles.get(token_a, np.array([1.0,0.0,0.0,0.0]))
         allele_b = self.grammar.semantic_alleles.get(token_b, np.array([1.0,0.0,0.0,0.0]))
-        new_allele = quaternion.quat_mul(allele_a, allele_b)
-        new_allele = quaternion.quat_norm(new_allele)
+        new_allele = fuse_alleles(allele_a, allele_b)
         
         logger.debug(f"Fused Alleles | a: {np.round(allele_a, 2)}, b: {np.round(allele_b, 2)} -> New: {np.round(new_allele, 2)}")
 
