@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "bitstring>=4.3.1",
     "isal>=1.7.2",
+    "matplotlib>=3.10.6",
     "msgpack>=1.1.1",
     "numpy>=2.3.2",
     "scikit-learn>=1.7.1",

@@ -5,73 +5,9 @@ import sys
 import time
 import tempfile
 import shutil
-from fme_core import FractalMarkovAlleleEngine
-from genome import Genome, EngineConfig, Grammar
-from typing import Optional, Tuple, Dict, List
-from aspire import Opix
-from zip import extract_zip_deflate_streams, blit_to_reflex_bytes, DirectoryScanner, FileOp, unpack_reflex
 from pathlib import Path
 from collections import defaultdict
-from fme_engine import EngineResult
 
-
-def create_genesis_bytes(sources: list, recursive: bool, include_all: bool, bootstrap: bool = True, energy_budget: int = 10 * 1024 * 1024) -> bytes:
-    """Creates a new genesis genome from source files and directories and returns it as bytes."""
-
-    states = ['carry', 'borrow', 'drift']
-    priors = defaultdict(dict)
-    for s_from in states:
-        for s_to in states:
-            priors[s_from][s_to] = 1.0 / len(states)
-
-    config = EngineConfig(
-        symbols=states,
-        priors={k: dict(v) for k, v in priors.items()}
-    )
-
-    all_ops = []
-    total_energy_spent = 0
-
-    for source_str in sources:
-        source = Path(source_str)
-        if source.is_dir():
-            scanner = DirectoryScanner(
-                source,
-                energy_budget=energy_budget - total_energy_spent,
-                filter_fn=lambda p: include_all or not p.name.startswith('.')
-            )
-            scan_result = scanner.scan()
-            ops_to_add = [op._replace(
-                path=f"{source.name}/{op.path}") for op in scan_result.manifest.ops]
-            all_ops.extend(ops_to_add)
-            total_energy_spent += scan_result.energy_spent
-        elif source.is_file():
-            if (not include_all and source.name.startswith('.')) or source.name.endswith('.genyx.zip'):
-                continue
-            try:
-                data = source.read_bytes()
-                file_energy = len(data)
-                if total_energy_spent + file_energy <= energy_budget:
-                    all_ops.append(FileOp(source.name, data))
-                    total_energy_spent += file_energy
-            except IOError:
-                pass
-
-    grammar = Grammar()
-    all_ops.append(FileOp('registry/report.txt', b"[SYSTEM_SUMMARY]"))
-
-    temp_assets = {op.path: op.data for op in all_ops}
-    genesis_genome = Genome(
-        config=config, grammar=grammar, extra_assets=temp_assets)
-
-    if bootstrap:
-        try:
-            genesis_genome.build_shallow_grammar()
-        except Exception:
-            pass
-
-    final_manifest = genesis_genome.to_manifest()
-    return blit_to_reflex_bytes(final_manifest)
 
 
 def _genome_from_directory(dir_path: str) -> Genome:
@@ -105,12 +41,10 @@ def _genome_from_directory(dir_path: str) -> Genome:
 
 def generation_defaults():
     # Late import to avoid circulars in type-checkers
-    from genome import EngineConfig
     return EngineConfig()
 
 
 def grammar_defaults():
-    from genome import Grammar
     return Grammar()
 
 

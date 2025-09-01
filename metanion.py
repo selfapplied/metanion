@@ -14,11 +14,8 @@ This enables proper bootstrap order where modules can register their specs
 before the full emits system is loaded.
 """
 
-from __future__ import annotations
 from collections import namedtuple
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
-import inspect
-import hashlib
 
 # Core Metanion structures
 HilbertPoint = namedtuple('HilbertPoint', ['density', 'entropy', 'depth', 'diversity'])
@@ -30,8 +27,9 @@ Metanion = namedtuple('Metanion', ['S', 'T', 'm', 'alpha', 'Q', 'E'])
 Spec = namedtuple('Spec', ['raw', 'inputs', 'outputs', 'mint'])
 
 # Global registries for cross-module access
-_pending_specs: List[Tuple[str, str, Callable[..., Any]]] = []  # (func_name, pattern, func)
-_genes: Dict[str, List[Spec]] = {}
+# (func_name, pattern, func)
+pending: List[Tuple[str, str, Callable[..., Any]]] = []
+genes: Dict[str, List[Spec]] = {}
 _mint_seq: int = 1
 _minted: Dict[str, int] = {}
 
@@ -126,38 +124,12 @@ def em(pattern: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         name = getattr(fn, '__name__', 'anon')
-        
-        # Try to register immediately if emits is ready
-        try:
-            import emits
-            if hasattr(emits, '_emits_ready') and emits._emits_ready:
-                # Use the same Spec type as emits
-                emits_spec = emits.Spec(spec.raw, spec.inputs, spec.outputs, spec.mint)
-                emits.genes[name].append(emits_spec)
-            else:
-                # Queue for later registration
-                _pending_specs.append((name, pattern, fn))
-        except ImportError:
-            # Emits not ready yet, queue locally
-            _pending_specs.append((name, pattern, fn))
-        
+        # Queue for registration by the full emits system; keep a local view too
+        pending.append((name, spec.raw, fn))
+        genes.setdefault(name, []).append(spec)
         return fn
 
     return decorate
-
-def register_pending_specs():
-    """Register all pending specs with the emits system."""
-    try:
-        import emits
-        for func_name, pattern, func in _pending_specs:
-            spec = recog(pattern)
-            # Use the same Spec type as emits
-            emits_spec = emits.Spec(spec.raw, spec.inputs, spec.outputs, spec.mint)
-            emits.genes[func_name].append(emits_spec)
-        _pending_specs.clear()
-    except ImportError:
-        # Emits not available, keep queued
-        pass
 
 def get_genes() -> Dict[str, List[Spec]]:
     """Get the current gene registry."""
@@ -169,10 +141,4 @@ def get_genes() -> Dict[str, List[Spec]]:
             converted_genes[name] = [Spec(s.raw, s.inputs, s.outputs, s.mint) for s in specs]
         return converted_genes
     except ImportError:
-        return _genes
-
-# Export the core structures
-__all__ = [
-    'Metanion', 'HilbertPoint', 'SpatialEntry', 'Transform',
-    'Spec', 'em', 'mint', 'recog', 'register_pending_specs', 'get_genes'
-]
+        return genes
