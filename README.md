@@ -22,27 +22,20 @@ These elements form a fiber bundle with energy $\mathcal{E}(m)$ that records com
 The Metanion Field Theory is anchored by the following CE1 seed:
 
 ```ce1
-<span style="color: #2563eb;">CE1</span><span style="color: #dc2626;">{</span>
-  <span style="color: #059669;">lens</span>=<span style="color: #7c3aed;">AUTOVERSE</span> | <span style="color: #7c3aed;">METANION_COSMOS</span>
-  <span style="color: #059669;">mode</span>=<span style="color: #dc2626;">HilbertWalk</span>
-  <span style="color: #059669;">basis</span>=<span style="color: #2563eb;">Ξ</span>=<span style="color: #dc2626;">autoverse</span>:<span style="color: #7c3aed;">law_basis</span>
-  <span style="color: #059669;">data</span>={<span style="color: #dc2626;">m_U</span>, <span style="color: #2563eb;">α_U</span>, <span style="color: #059669;">Q_U</span>, <span style="color: #7c3aed;">E(m_U)</span>}
-  <span style="color: #059669;">ops</span>=[<span style="color: #2563eb;">Observe</span>; <span style="color: #059669;">Evolve</span>; <span style="color: #dc2626;">Inflate</span>; <span style="color: #7c3aed;">Collapse</span>; <span style="color: #2563eb;">Decorate</span>]
-  <span style="color: #059669;">laws</span>={<span style="color: #2563eb;">conservation_of_information</span>; <span style="color: #059669;">gauge_invariance</span>; <span style="color: #dc2626;">α_duality</span>; <span style="color: #7c3aed;">operadic_closure</span>}
-  <span style="color: #059669;">emit</span>=<span style="color: #dc2626;">Reality</span>
-<span style="color: #dc2626;">}</span>
+CE1{
+  lens=AUTOVERSE | METANION_COSMOS
+  mode=HilbertWalk
+  basis=Ξ=autoverse:law_basis
+  data={m_U, α_U, Q_U, E(m_U)}
+  ops=[Observe; Evolve; Inflate; Collapse; Decorate]
+  laws={conservation_of_information; gauge_invariance; α_duality; operadic_closure}
+  emit=Reality
+}
 ```
 
 This specification serves as a bridge between the theoretical framework and practical implementation, defining the operational modes, data structures, and physical laws that govern the Metanion system.
 
-**Color Coding (inspired by Metanion Field Theory):**
-- <span style="color: #059669;">**Green**</span>: Quaternion orientations and gauge symmetries
-- <span style="color: #2563eb;">**Blue**</span>: Low energy states and inflation parameters
-- <span style="color: #dc2626;">**Red**</span>: High energy states and bitmask coordinates
-- <span style="color: #7c3aed;">**Purple**</span>: Energy functionals and cosmic structures
-
-## Visualizations
-The paper includes three key visualizations:
+## VisualizationsThe paper includes three key visualizations:
 
 1. **Figure 1**: Mathematical visualization showing energy states, quaternion orientations, and geodesic evolution paths
 2. **Figure 2**: Energy-shaded Boolean cube with face shading and alpha inflation as height
