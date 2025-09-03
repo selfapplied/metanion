@@ -15,6 +15,19 @@ A unified framework for reversible computation, energy dynamics, and geometric f
 
 **[📖 Read the Complete Paper (PDF)](metanion_field_theory.pdf)**
 
+## Field Theory Visualizations
+
+The autoverse field theory in action:
+
+![Metanion Field](metanion_field_20250902-213355.png)
+*The metanion field structure showing charged particle emergence*
+
+![Zeta Field](zeta_field_20250902-211846.png)
+*The zeta field revealing the underlying field dynamics*
+
+![Zeta Field Equations](zeta_field_equations_20250902-211942.png)
+*The field equations governing the mathematical reality*
+
 ## New Particles for the New Age
 
 Metanion Field Theory discovers and catalogs the new particles that emerge in balance from the equilibrium geometry. These are the living mathematical entities that arise when the critical lines meet, the charged particles that encode both discrete and continuous transformations in the autoverse.
