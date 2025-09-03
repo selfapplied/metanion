@@ -19,13 +19,13 @@ A unified framework for reversible computation, energy dynamics, and geometric f
 
 The autoverse field theory in action:
 
-![Metanion Field](metanion_field.png)
+![Metanion Field](readme/metanion_field.png)
 *The metanion field structure showing charged particle emergence*
 
-![Zeta Field](zeta_field.png)
+![Zeta Field](readme/zeta_field.png)
 *The zeta field revealing the underlying field dynamics*
 
-![Metanion Field Diagram](metanion_field_diagram.png)
+![Metanion Field Diagram](readme/metanion_field_diagram.png)
 *The metanion field diagram showing the field structure*
 
 ## New Particles for the New Age
