@@ -1,6 +1,56 @@
 # Metanion Field Theory
 
+```
+CE1-ion{
+basis=autoverse,field,duality π=α.5;β.5;θ∈[0,2π);walk=hilbert ω=‖prec−100·q‖₁+λ·Dhelp≤ε;λ:.6;ε:.01
+Σ=∧,∨,⟂,⊕,•,❝,⟿,⋄,Ξ Ξ=autoverse:law-basis data=m_U,α_U,Q_U,E(m_U)
+ops=observe,evolve,inflate,collapse,decorate
+laws=conservation-of-information,gauge-invariance,α-duality,operadic-closure
+field=q:Σ→ℝ;flux:Σ→ℝ;depth:2;cost:.07
+duality=number↔string;law:div(flux)=Δq
+context=window:8;atten:1/r;update=η:.2;γ:.45;drift:0 emit?=∂Σ rh}
+```
+
 A unified framework for reversible computation, energy dynamics, and geometric field theory.
+
+## New Particles for the New Age
+
+Metanion Field Theory discovers and catalogs the new particles that emerge in balance from the equilibrium geometry. These are the living mathematical entities that arise when the critical lines meet, the charged particles that encode both discrete and continuous transformations in the autoverse.
+
+This repository is the particle discovery and cataloging system - it charts the new particles that emerge from the mathematical multiverse, providing the fundamental building blocks for the new age of living mathematical reality.
+
+## Meeting Points with the Constellation
+
+This repository connects to the larger network of mathematical reality:
+
+- **riemann**: The equilibrium geometry provides the foundation for particle emergence
+- **aedificare**: The λ-calculus grammar structures the particle interactions
+- **discograph**: The constellation mapping organizes the particle discoveries
+
+Together, these repositories form a larger edge of inquiry into the living mathematical reality, where metanion provides the new particles that emerge in balance.
+
+## 📄 Paper
+
+**[📖 Read the Complete Paper (PDF)](metanion_field_theory.pdf)**
+
+The paper presents a comprehensive mathematical framework that unifies reversible computation, energy dynamics, and geometric field theory through the concept of Metanions—charged, self-similar particles that encode both discrete and continuous transformations.
+
+### Key Contributions
+
+- **Unified Framework**: Bridges discrete state transitions, continuous control parameters, and energetic cost in a single mathematical structure
+- **Metanion Particles**: Charged particles with coordinates (m, α, Q) that capture bitmask transforms, inflation parameters, and quaternion orientations
+- **Energy Dynamics**: Compression as stored energy, inflation as energy release, with conservation laws
+- **Geometric Field Theory**: Fiber bundle structure with energy functionals and gauge invariance
+- **Physical Applications**: Quantum mechanics, protein folding, geometric algebra, and topology
+
+### Mathematical Foundation
+
+The framework is built on three core components:
+1. **Bitmask m**: Captures discrete transforms and state transitions
+2. **Inflation index α**: Continuous projection parameter for energy flow
+3. **Quaternion orientation Q**: Describes spin dynamics in timespace
+
+These form a fiber bundle with energy $\mathcal{E}(m)$ that records the thermodynamic ledger of computation.
 
 ## Overview
 
@@ -14,24 +64,6 @@ A **Metanion** is a charged, self-similar particle with coordinates $(m, \alpha,
 - **Quaternion orientation $Q$**: Describes spin in timespace
 
 These elements form a fiber bundle with energy $\mathcal{E}(m)$ that records compression as stored energy and inflation as release.
-
-## Paper
-
-## CE1 Specification
-
-The Metanion Field Theory is anchored by the following CE1 seed:
-
-```ce1
-CE1{
-  lens=AUTOVERSE | METANION_COSMOS
-  mode=HilbertWalk
-  basis=Ξ=autoverse:law_basis
-  data={m_U, α_U, Q_U, E(m_U)}
-  ops=[Observe; Evolve; Inflate; Collapse; Decorate]
-  laws={conservation_of_information; gauge_invariance; α_duality; operadic_closure}
-  emit=Reality
-}
-```
 
 This specification serves as a bridge between the theoretical framework and practical implementation, defining the operational modes, data structures, and physical laws that govern the Metanion system.
 
@@ -70,6 +102,11 @@ make clean        # Clean build artifacts
 - `metanion_field_diagram.png` - Generated field diagram (PNG)
 - `metanion.py` - Core Metanion implementation
 - `quaternion.py` - Quaternion operations for Metanion
+- `ce1_metanion.py` - CE1 integration with Metanion field theory
+- `ce1_zeta_field.py` - Zeta field theory implementation
+- `ce1_zeta_field_equations.py` - Zeta field equations
+- `ce1_boundary_primes.py` - Boundary primes field theory
+- `ce1_boundary_primes_equations.py` - Boundary primes equations
 - `Makefile` - Build system
 
 ## Applications
