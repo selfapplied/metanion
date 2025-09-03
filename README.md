@@ -22,11 +22,11 @@ The autoverse field theory in action:
 ![Metanion Field](metanion_field.png)
 *The metanion field structure showing charged particle emergence*
 
-![Metanion Field Diagram](metanion_field_diagram.png)
-*The metanion field diagram showing the underlying field dynamics*
+![Zeta Field](zeta_field.png)
+*The zeta field revealing the underlying field dynamics*
 
-![Zeta Field Equations](zeta_equations.png)
-*The field equations governing the mathematical reality*
+![Metanion Field Diagram](metanion_field_diagram.png)
+*The metanion field diagram showing the field structure*
 
 ## New Particles for the New Age
 
