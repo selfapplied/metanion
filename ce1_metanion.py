@@ -25,8 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 # Import CE1 components
-from ce1_core import TimeReflectionInvolution, CE1Kernel, UnifiedEquilibriumOperator
-from ce1_convolution import DressedCE1Kernel, MellinDressing
+from ce1_local import TimeReflectionInvolution, CE1Kernel, UnifiedEquilibriumOperator, DressedCE1Kernel, MellinDressing
 
 
 class MetanionFieldType(Enum):

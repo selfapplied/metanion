@@ -26,8 +26,7 @@ import time
 import math
 
 # Import CE1 components
-from ce1_core import TimeReflectionInvolution, CE1Kernel
-from ce1_convolution import DressedCE1Kernel, MellinDressing
+from ce1_local import TimeReflectionInvolution, CE1Kernel, DressedCE1Kernel, MellinDressing
 
 
 class BoundaryPrimes:

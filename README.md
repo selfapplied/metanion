@@ -81,6 +81,7 @@ make clean        # Clean build artifacts
 - `metanion_field_diagram.png` - Generated field diagram (PNG)
 - `metanion.py` - Core Metanion implementation
 - `quaternion.py` - Quaternion operations for Metanion
+- `ce1_local.py` - Local CE1 components for field theory
 - `ce1_metanion.py` - CE1 integration with Metanion field theory
 - `ce1_zeta_field.py` - Zeta field theory implementation
 - `ce1_zeta_field_equations.py` - Zeta field equations
