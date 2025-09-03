@@ -13,6 +13,8 @@ context=window:8;atten:1/r;update=η:.2;γ:.45;drift:0 emit?=∂Σ rh}
 
 A unified framework for reversible computation, energy dynamics, and geometric field theory.
 
+**[📖 Read the Complete Paper (PDF)](metanion_field_theory.pdf)**
+
 ## New Particles for the New Age
 
 Metanion Field Theory discovers and catalogs the new particles that emerge in balance from the equilibrium geometry. These are the living mathematical entities that arise when the critical lines meet, the charged particles that encode both discrete and continuous transformations in the autoverse.
@@ -28,29 +30,6 @@ This repository connects to the larger network of mathematical reality:
 - **discograph**: The constellation mapping organizes the particle discoveries
 
 Together, these repositories form a larger edge of inquiry into the living mathematical reality, where metanion provides the new particles that emerge in balance.
-
-## 📄 Paper
-
-**[📖 Read the Complete Paper (PDF)](metanion_field_theory.pdf)**
-
-The paper presents a comprehensive mathematical framework that unifies reversible computation, energy dynamics, and geometric field theory through the concept of Metanions—charged, self-similar particles that encode both discrete and continuous transformations.
-
-### Key Contributions
-
-- **Unified Framework**: Bridges discrete state transitions, continuous control parameters, and energetic cost in a single mathematical structure
-- **Metanion Particles**: Charged particles with coordinates (m, α, Q) that capture bitmask transforms, inflation parameters, and quaternion orientations
-- **Energy Dynamics**: Compression as stored energy, inflation as energy release, with conservation laws
-- **Geometric Field Theory**: Fiber bundle structure with energy functionals and gauge invariance
-- **Physical Applications**: Quantum mechanics, protein folding, geometric algebra, and topology
-
-### Mathematical Foundation
-
-The framework is built on three core components:
-1. **Bitmask m**: Captures discrete transforms and state transitions
-2. **Inflation index α**: Continuous projection parameter for energy flow
-3. **Quaternion orientation Q**: Describes spin dynamics in timespace
-
-These form a fiber bundle with energy $\mathcal{E}(m)$ that records the thermodynamic ledger of computation.
 
 ## Overview
 
